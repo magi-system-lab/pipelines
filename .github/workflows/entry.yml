@@ -1,0 +1,294 @@
+# Lector y decisor central. Los repos de apps solo lo invocan; toda la lógica vive aquí.
+# Si algún día migro a Forgejo, cambia este archivo, no los repos.
+name: entry
+
+on:
+  workflow_call:
+    secrets:
+      # Datos de la red interna: no se escriben en el código porque este repo
+      # es público por obligación (un repo público no puede consumir workflows
+      # reusables de uno privado). Se definen como secretos en cada repo de app
+      # y llegan aquí con "secrets: inherit".
+      CLUSTER_HOST:
+        required: true
+      CLUSTER_USER:
+        required: true
+      APP_PROPERTIES_PREVIEW:
+        required: false
+      APP_PROPERTIES_PROD:
+        required: false
+      # Variables de entorno sensibles, formato KEY=VALOR una por linea.
+      APP_SECRET_ENV_PREVIEW:
+        required: false
+      APP_SECRET_ENV_PROD:
+        required: false
+
+env:
+  DOMAIN: lab.home.arpa
+
+jobs:
+  deploy:
+    # Doble barrera de seguridad para repos públicos con runner en mi red:
+    #   1. GitHub exige aprobación para todo contribuidor externo.
+    #   2. Esta condición: un PR desde un fork NO coincide, así que ni aprobándolo
+    #      por error puede ejecutarse en mi Mac. Solo ramas del propio repo.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, homelab]
+    timeout-minutes: 30
+
+    steps:
+      - name: Traer el código de la app
+        uses: actions/checkout@v5
+
+      - name: Traer los perfiles
+        uses: actions/checkout@v5
+        with:
+          repository: ivan0063/pipelines
+          path: .pipelines
+          ref: main
+
+      - name: Leer launch.yml y decidir qué hacer
+        id: plan
+        run: |
+          set -euo pipefail
+          test -f launch.yml || { echo "::error::este repo no tiene launch.yml en la raíz"; exit 1; }
+
+          PROFILE=$(yq -r '.profile' launch.yml)
+          APP=$(yq -r '.app' launch.yml)
+          # Si el repo declara su propio Containerfile/Dockerfile, se respeta.
+          # Si no, se usa el genérico del perfil.
+          CFILE=$(yq -r '.containerfile // ""' launch.yml)
+
+          # Qué ambiente, según el evento
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            ENVNAME=preview
+            NS="pr-${{ github.event.pull_request.number }}"
+            PRIORITY=preview-priority
+            if [ "${{ github.event.action }}" = "closed" ]; then ACTION=delete; else ACTION=deploy; fi
+          else
+            ENVNAME=prod
+            NS=prod
+            PRIORITY=prod-priority
+            # Un push solo despliega si su rama está declarada en environments.prod.branches
+            BRANCHES=$(yq -r '.environments.prod.branches // [] | join(" ")' launch.yml)
+            case " $BRANCHES " in
+              *" ${{ github.ref_name }} "*) ACTION=deploy ;;
+              *) ACTION=skip ;;
+            esac
+          fi
+
+          # La regla de mezcla: los mapas se fusionan por clave, los escalares
+          # del ambiente ganan sobre el default de arriba.
+          PORT=$(yq -r ".environments.$ENVNAME.port // .port // 8080" launch.yml)
+          JAVA_OPTS=$(yq -r ".environments.$ENVNAME.\"java-opts\" // .\"java-opts\" // \"\"" launch.yml)
+          HOSTBASE=$(yq -r ".environments.$ENVNAME.host // .host // \"\"" launch.yml)
+          yq -o=yaml ".env * (.environments.$ENVNAME.env // {})" launch.yml > /tmp/env.$$.yaml
+
+          # Nombre externo: prod usa el host tal cual, el preview lleva su número de PR
+          HOST=""
+          if [ -n "$HOSTBASE" ] && [ "$HOSTBASE" != "null" ]; then
+            if [ "$ENVNAME" = "prod" ]; then HOST="$HOSTBASE.${{ env.DOMAIN }}";
+            else HOST="$HOSTBASE-$NS.${{ env.DOMAIN }}"; fi
+          fi
+
+          TAG="$ENVNAME-$(echo ${{ github.sha }} | cut -c1-7)"
+          {
+            echo "profile=$PROFILE"
+            echo "app=$APP"
+            echo "env=$ENVNAME"
+            echo "ns=$NS"
+            echo "action=$ACTION"
+            echo "port=$PORT"
+            echo "java_opts=$JAVA_OPTS"
+            echo "host=$HOST"
+            echo "priority=$PRIORITY"
+            echo "image=localhost/$APP:$TAG"
+            echo "containerfile=$CFILE"
+            echo "envfile=/tmp/env.$$.yaml"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "### Plan" >> "$GITHUB_STEP_SUMMARY"
+          echo "- perfil: \`$PROFILE\` · app: \`$APP\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- acción: \`$ACTION\` en namespace \`$NS\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------- PR cerrado: borrar su preview ----------
+      - name: Borrar el preview del PR cerrado
+        if: steps.plan.outputs.action == 'delete'
+        run: |
+          kubectl delete namespace "${{ steps.plan.outputs.ns }}" --ignore-not-found --wait=false
+          echo "- preview \`${{ steps.plan.outputs.ns }}\` borrado" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------- Construir ----------
+      - name: Construir la imagen con Podman
+        if: steps.plan.outputs.action == 'deploy'
+        run: |
+          set -euo pipefail
+          CF="${{ steps.plan.outputs.containerfile }}"
+          if [ -n "$CF" ]; then
+            echo "usando el Containerfile del repo: $CF"
+          else
+            CF=".pipelines/profiles/${{ steps.plan.outputs.profile }}/Containerfile"
+            echo "usando el Containerfile genérico del perfil"
+          fi
+          podman build -f "$CF" -t "${{ steps.plan.outputs.image }}" .
+
+      - name: Cargar la imagen en containerd de balthazar
+        if: steps.plan.outputs.action == 'deploy'
+        run: |
+          set -euo pipefail
+          # Sin registry: la imagen viaja por SSH y entra directo al containerd de k3s.
+          podman save --format oci-archive "${{ steps.plan.outputs.image }}" \
+            | ssh -i ~/.ssh/id_ed25519_balthazar_ci -o BatchMode=yes \
+                  "${{ secrets.CLUSTER_USER }}@${{ secrets.CLUSTER_HOST }}" \
+                  'sudo -n /usr/local/bin/k3s ctr images import -'
+
+      # ---------- Preparar el namespace ----------
+      - name: Preparar namespace y tope de recursos
+        if: steps.plan.outputs.action == 'deploy'
+        run: |
+          set -euo pipefail
+          kubectl create namespace "${{ steps.plan.outputs.ns }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # Los previews llevan tope de CPU y memoria; prod no se limita por namespace.
+          if [ "${{ steps.plan.outputs.env }}" = "preview" ]; then
+            cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: ResourceQuota
+          metadata:
+            name: preview-quota
+            namespace: ${{ steps.plan.outputs.ns }}
+          spec:
+            hard:
+              requests.cpu: "500m"
+              requests.memory: 512Mi
+              limits.memory: 1Gi
+              pods: "4"
+          EOF
+          fi
+
+      - name: Montar las properties como Secret
+        if: steps.plan.outputs.action == 'deploy'
+        env:
+          PROPS_PREVIEW: ${{ secrets.APP_PROPERTIES_PREVIEW }}
+          PROPS_PROD: ${{ secrets.APP_PROPERTIES_PROD }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.plan.outputs.env }}" = "prod" ]; then PROPS="$PROPS_PROD"; else PROPS="$PROPS_PREVIEW"; fi
+          if [ -n "${PROPS:-}" ]; then
+            printf '%s' "$PROPS" > /tmp/application.properties
+            kubectl -n "${{ steps.plan.outputs.ns }}" create secret generic \
+              "${{ steps.plan.outputs.app }}-config" \
+              --from-file=application.properties=/tmp/application.properties \
+              --dry-run=client -o yaml | kubectl apply -f -
+            rm -f /tmp/application.properties
+            echo "CONFIG_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            echo "CONFIG_ENABLED=false" >> "$GITHUB_ENV"
+            echo "- sin properties: no hay secret de Actions para este ambiente" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # ---------- Desplegar ----------
+      - name: Montar las variables de entorno sensibles
+        if: steps.plan.outputs.action == 'deploy'
+        env:
+          SENV_PREVIEW: ${{ secrets.APP_SECRET_ENV_PREVIEW }}
+          SENV_PROD: ${{ secrets.APP_SECRET_ENV_PROD }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.plan.outputs.env }}" = "prod" ]; then SENV="$SENV_PROD"; else SENV="$SENV_PREVIEW"; fi
+          if [ -n "${SENV:-}" ]; then
+            printf '%s' "$SENV" > /tmp/senv.env
+            kubectl -n "${{ steps.plan.outputs.ns }}" create secret generic \
+              "${{ steps.plan.outputs.app }}-env" \
+              --from-env-file=/tmp/senv.env \
+              --dry-run=client -o yaml | kubectl apply -f -
+            rm -f /tmp/senv.env
+            echo "SECRET_ENV_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            echo "SECRET_ENV_ENABLED=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Desplegar con Helm
+        if: steps.plan.outputs.action == 'deploy'
+        run: |
+          set -euo pipefail
+          # launch.yml se traduce a valores del chart; el chart aporta la convención.
+          cat > /tmp/values.generated.yaml <<EOF
+          app: "${{ steps.plan.outputs.app }}"
+          image: "${{ steps.plan.outputs.image }}"
+          port: ${{ steps.plan.outputs.port }}
+          javaOpts: "${{ steps.plan.outputs.java_opts }}"
+          priorityClass: "${{ steps.plan.outputs.priority }}"
+          host: "${{ steps.plan.outputs.host }}"
+          config:
+            enabled: ${CONFIG_ENABLED}
+          secretEnv:
+            enabled: ${SECRET_ENV_ENABLED}
+          EOF
+          yq -i ".env = load(\"${{ steps.plan.outputs.envfile }}\")" /tmp/values.generated.yaml
+
+          helm upgrade --install "${{ steps.plan.outputs.app }}" \
+            ".pipelines/profiles/${{ steps.plan.outputs.profile }}/chart" \
+            --namespace "${{ steps.plan.outputs.ns }}" \
+            -f /tmp/values.generated.yaml \
+            --wait --timeout 5m
+
+      - name: Resumen del despliegue
+        if: steps.plan.outputs.action == 'deploy'
+        run: |
+          set -euo pipefail
+          NS="${{ steps.plan.outputs.ns }}"
+          APP="${{ steps.plan.outputs.app }}"
+          NODEPORT=$(kubectl -n "$NS" get svc "$APP" -o jsonpath='{.spec.ports[0].nodePort}')
+
+          {
+            echo ""
+            echo "## ${APP} → ${{ steps.plan.outputs.env }}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **URL** | http://${{ secrets.CLUSTER_HOST }}:\$NODEPORT |"
+            echo "| Namespace | \`$NS\` |"
+            echo "| Imagen | \`${{ steps.plan.outputs.image }}\` |"
+            echo "| Prioridad | \`${{ steps.plan.outputs.priority }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            if [ -n "${{ steps.plan.outputs.host }}" ]; then
+              echo "| Con DNS (fase 2) | http://${{ steps.plan.outputs.host }} |"
+            fi
+            echo ""
+            echo "### Pods"
+            echo ""
+            echo '```'
+            kubectl -n "$NS" get pods -o wide
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Lo que de verdad sirve cuando algo falla: el estado del cluster queda
+      # en la corrida, sin tener que entrar a balthazar a investigar.
+      - name: Diagnóstico si algo falló
+        if: failure() && steps.plan.outputs.action == 'deploy'
+        run: |
+          NS="${{ steps.plan.outputs.ns }}"
+          APP="${{ steps.plan.outputs.app }}"
+          {
+            echo ""
+            echo "## ❌ Diagnóstico"
+            echo ""
+            echo "### Eventos del namespace"
+            echo '```'
+            kubectl -n "$NS" get events --sort-by=.lastTimestamp 2>&1 | tail -25 || true
+            echo '```'
+            echo "### Estado de los pods"
+            echo '```'
+            kubectl -n "$NS" describe pods -l app.kubernetes.io/name="$APP" 2>&1 \
+              | grep -A12 -E "^(Name:|Status:|Events:)" | head -60 || true
+            echo '```'
+            echo "### Últimas líneas del log de la app"
+            echo '```'
+            kubectl -n "$NS" logs -l app.kubernetes.io/name="$APP" --tail=50 --all-containers 2>&1 | tail -50 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

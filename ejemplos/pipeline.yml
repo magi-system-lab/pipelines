@@ -1,0 +1,13 @@
+# .github/workflows/pipeline.yml — idéntico en todos los repos de apps.
+# Solo dispara; toda la lógica vive en el repo pipelines.
+name: pipeline
+
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+jobs:
+  run:
+    uses: ivan0063/pipelines/.github/workflows/entry.yml@main
+    secrets: inherit

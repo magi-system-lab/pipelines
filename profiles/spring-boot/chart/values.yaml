@@ -1,0 +1,38 @@
+# Defaults del perfil. Lo que declara launch.yml se genera en values.generated.yaml
+# y sobrescribe esto. Aquí vive la convención: memoria, sondas, usuario, prioridad.
+app: ""
+image: ""
+port: 8080
+javaOpts: ""
+env: {}
+
+priorityClass: preview-priority
+
+service:
+  # NodePort para que la app sea alcanzable por IP mientras no haya DNS local.
+  type: NodePort
+
+# Ingress solo si launch.yml declara "host". Hasta que exista AdGuard, queda inerte.
+host: ""
+
+# Properties montadas en /config/application.properties desde un Secret.
+config:
+  enabled: false
+
+# Variables de entorno sensibles (contraseñas, tokens). Vienen de un Secret
+# creado por el pipeline, no de launch.yml: ahí solo van variables no sensibles.
+secretEnv:
+  enabled: false
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+# Sondas por TCP contra el puerto de la app: funcionan sin depender de
+# spring-boot-actuator, que no todas las apps incluyen.
+probes:
+  readinessInitialDelay: 20
+  livenessInitialDelay: 60

@@ -1,0 +1,34 @@
+# Containerfile genérico del perfil spring-boot.
+# Detecta Maven o Gradle solo: nada específico de una app vive aquí.
+# Si un repo prefiere su propio Dockerfile, lo declara con "containerfile" en launch.yml.
+
+FROM docker.io/library/eclipse-temurin:21-jdk AS build
+WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends maven && rm -rf /var/lib/apt/lists/*
+COPY . .
+RUN set -eux; \
+    if [ -x ./gradlew ]; then \
+        ./gradlew --no-daemon clean bootJar -x test; \
+        cp build/libs/*.jar /tmp/app.jar; \
+    elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then \
+        echo "build.gradle sin wrapper: usa el wrapper del proyecto" >&2; exit 1; \
+    elif [ -x ./mvnw ]; then \
+        ./mvnw -B -ntp clean package -DskipTests; \
+        cp target/*.jar /tmp/app.jar; \
+    elif [ -f pom.xml ]; then \
+        mvn -B -ntp clean package -DskipTests; \
+        cp target/*.jar /tmp/app.jar; \
+    else \
+        echo "no encontre pom.xml ni build.gradle: no se que sistema de build usar" >&2; exit 1; \
+    fi
+
+FROM docker.io/library/eclipse-temurin:21-jre
+RUN useradd -r -u 1001 -m -d /app spring
+WORKDIR /app
+COPY --from=build /tmp/app.jar /app/app.jar
+RUN mkdir -p /config && chown -R spring:spring /app /config
+USER spring
+# Lo monta el chart si launch.yml declara secrets con format properties|yaml.
+ENV SPRING_CONFIG_ADDITIONAL_LOCATION=file:/config/
+# JAVA_TOOL_OPTIONS lo inyecta el chart desde launch.yml; la JVM lo lee sola.
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

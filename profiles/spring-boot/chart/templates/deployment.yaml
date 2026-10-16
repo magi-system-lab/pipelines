@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sb.name" . }}
+  labels: {{- include "sb.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.app }}
+  template:
+    metadata:
+      labels: {{- include "sb.labels" . | nindent 8 }}
+      annotations:
+        # Fuerza un rollout cuando cambian las properties, sin necesitar Reloader.
+        checksum/config: {{ printf "%v-%v" .Values.config .Values.secretEnv | sha256sum }}
+    spec:
+      priorityClassName: {{ .Values.priorityClass }}
+      containers:
+        - name: app
+          image: {{ .Values.image }}
+          # La imagen se carga con "k3s ctr images import": nunca se baja de un registry.
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: {{ .Values.port }}
+          env:
+            - name: SERVER_PORT
+              value: {{ .Values.port | quote }}
+            {{- if .Values.javaOpts }}
+            - name: JAVA_TOOL_OPTIONS
+              value: {{ .Values.javaOpts | quote }}
+            {{- end }}
+            {{- range $k, $v := .Values.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- if .Values.secretEnv.enabled }}
+          envFrom:
+            - secretRef:
+                name: {{ include "sb.name" . }}-env
+          {{- end }}
+          {{- if .Values.config.enabled }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+          {{- end }}
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.port }}
+            initialDelaySeconds: {{ .Values.probes.readinessInitialDelay }}
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.port }}
+            initialDelaySeconds: {{ .Values.probes.livenessInitialDelay }}
+            periodSeconds: 20
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.config.enabled }}
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ include "sb.name" . }}-config
+      {{- end }}

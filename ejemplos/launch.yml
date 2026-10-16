@@ -1,0 +1,20 @@
+# launch.yml — va en la raíz del repo de cada app.
+# Formato propio, no de GitHub: portable si algún día migro a Forgejo.
+profile: spring-boot
+app: pagos-api
+
+# Defaults: aplican a todos los ambientes
+port: 8081
+host: pagos                      # pagos.lab.home.arpa en prod, pagos-pr-12... en preview
+java-opts: "-Xms128m -Xmx384m"
+env:
+  TZ: America/Mexico_City
+
+# Cada ambiente sobrescribe lo que repita.
+# Regla: los mapas (env) se fusionan por clave; los escalares del ambiente ganan.
+environments:
+  preview:                       # automático en cada PR, se borra al cerrarlo
+    env:
+      LOG_LEVEL: DEBUG
+  prod:
+    branches: [main]             # un PR nunca despliega a prod

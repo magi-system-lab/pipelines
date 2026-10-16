@@ -1,0 +1,5 @@
+apiVersion: v2
+name: spring-boot
+description: Perfil de despliegue para apps Spring Boot del homelab
+type: application
+version: 0.1.0
