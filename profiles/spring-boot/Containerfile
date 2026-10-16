@@ -1,6 +1,6 @@
-# Containerfile genérico del perfil spring-boot.
-# Detecta Maven o Gradle solo: nada específico de una app vive aquí.
-# Si un repo prefiere su propio Dockerfile, lo declara con "containerfile" en launch.yml.
+# Generic Containerfile for the spring-boot profile.
+# Detects Maven or Gradle on its own: nothing app-specific belongs here.
+# A repo that needs a custom image declares "containerfile" in its launch.yml.
 
 FROM docker.io/library/eclipse-temurin:21-jdk AS build
 WORKDIR /src
@@ -11,7 +11,7 @@ RUN set -eux; \
         ./gradlew --no-daemon clean bootJar -x test; \
         cp build/libs/*.jar /tmp/app.jar; \
     elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then \
-        echo "build.gradle sin wrapper: usa el wrapper del proyecto" >&2; exit 1; \
+        echo "build.gradle without a wrapper: commit the Gradle wrapper" >&2; exit 1; \
     elif [ -x ./mvnw ]; then \
         ./mvnw -B -ntp clean package -DskipTests; \
         cp target/*.jar /tmp/app.jar; \
@@ -19,7 +19,7 @@ RUN set -eux; \
         mvn -B -ntp clean package -DskipTests; \
         cp target/*.jar /tmp/app.jar; \
     else \
-        echo "no encontre pom.xml ni build.gradle: no se que sistema de build usar" >&2; exit 1; \
+        echo "no pom.xml and no build.gradle: cannot tell which build system to use" >&2; exit 1; \
     fi
 
 FROM docker.io/library/eclipse-temurin:21-jre
@@ -28,7 +28,7 @@ WORKDIR /app
 COPY --from=build /tmp/app.jar /app/app.jar
 RUN mkdir -p /config && chown -R spring:spring /app /config
 USER spring
-# Lo monta el chart si launch.yml declara secrets con format properties|yaml.
+# Mounted by the chart when launch.yml declares a secret with format properties|yaml.
 ENV SPRING_CONFIG_ADDITIONAL_LOCATION=file:/config/
-# JAVA_TOOL_OPTIONS lo inyecta el chart desde launch.yml; la JVM lo lee sola.
+# JAVA_TOOL_OPTIONS is injected by the chart from launch.yml; the JVM reads it itself.
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]

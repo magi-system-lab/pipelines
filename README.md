@@ -1,56 +1,66 @@
 # pipelines
 
-Perfiles de despliegue del homelab. Los repos de apps no contienen lógica de CI:
-solo un `launch.yml` que declara lo suyo y un disparador genérico de 10 líneas.
+Deployment profiles for the homelab. App repos carry no CI logic: just a
+`launch.yml` that declares what is specific to them, and a ten-line trigger.
 
-## Cómo agregar una app
+## Adding an app
 
-1. Copia `ejemplos/launch.yml` a la raíz del repo y ajusta `app`, `port`, `host`.
-2. Copia `ejemplos/pipeline.yml` a `.github/workflows/pipeline.yml`.
-3. Crea los secretos de Actions del repo:
-   - `CLUSTER_HOST` y `CLUSTER_USER` — obligatorios, apuntan a balthazar.
-   - `APP_PROPERTIES_PREVIEW` y `APP_PROPERTIES_PROD` — opcionales, con el
-     contenido de `application.properties`. Se montan en `/config` del pod.
-4. Abre un PR: se crea su preview. Haz merge: se despliega a prod.
+1. Copy `examples/launch.yml` to the repo root and adjust `app`, `port`, `host`.
+2. Copy `examples/pipeline.yml` to `.github/workflows/pipeline.yml`.
+3. Create the two Actions secrets the repo needs: `CLUSTER_HOST` and
+   `CLUSTER_USER`. They point at the cluster node.
+4. If the app needs credentials, write them into OpenBao under
+   `secret/<env>/<app>` and reference that path from `launch.yml`.
+5. Open a pull request: its preview comes up. Merge it: prod is deployed.
 
-## Qué hace el flujo
+## What the flow does
 
-| Evento | Resultado |
+| Event | Result |
 |---|---|
-| PR abierto o actualizado | preview en el namespace `pr-<número>`, con tope de recursos |
-| PR cerrado | su namespace se borra |
-| push a una rama de `environments.prod.branches` | despliegue a `prod` |
-| push a cualquier otra rama | no hace nada |
+| Pull request opened, updated or reopened | preview in namespace `pr-<number>`, with a resource cap |
+| Pull request closed | that namespace is deleted |
+| Push to a branch listed in `environments.prod.branches` | deploy to `prod` |
+| Push to any other branch | nothing |
 
-## Arquitectura
+## Architecture
 
-- **Build**: Podman en la Mac (arm64 nativo, sin emulación).
-- **Entrega de imagen**: sin registry. `podman save` por SSH hacia
-  `k3s ctr images import` en balthazar. El chart usa `imagePullPolicy: Never`.
-  El registry entra cuando balthazar tenga SSD.
-- **Despliegue**: Helm, un chart por perfil en `profiles/<perfil>/chart`.
-- **Prioridades**: prod usa `prod-priority` (1000), los previews
-  `preview-priority` (100). Si falta memoria, Kubernetes desaloja previews.
+- **Build**: Podman on the Mac mini, native arm64, no emulation.
+- **Image delivery**: no registry. `podman save` over SSH into
+  `k3s ctr images import` on balthazar, and the chart sets
+  `imagePullPolicy: Never`. A registry comes back when balthazar gets an SSD.
+- **Deploy**: Helm, one chart per profile under `profiles/<profile>/chart`.
+- **Priorities**: prod uses `prod-priority` (1000), previews use
+  `preview-priority` (100). Under memory pressure Kubernetes evicts previews first.
+- **Secrets**: OpenBao on casper, read by External Secrets Operator through a
+  read-only AppRole over TLS. The operator materialises a normal Kubernetes
+  Secret; the app reads env vars or files and never talks to OpenBao. CI never
+  sees a credential.
 
-## Seguridad con repos públicos
+## Profiles
 
-El runner vive en mi red, así que hay dos barreras:
+| Profile | Build | Port variable | Secret file default |
+|---|---|---|---|
+| `spring-boot` | Maven or Gradle, auto-detected | `SERVER_PORT` | `/config/application.properties` |
+| `node` | `npm ci --omit=dev`, runs `npm start` | `PORT` | `/config/.env` |
 
-1. GitHub exige aprobación para **todo** contribuidor externo
+## Security with public repos
+
+The runner lives on the home network, so there are two barriers:
+
+1. GitHub requires approval for **every** external contributor
    (`all_external_contributors`).
-2. El job está condicionado a que el PR venga de una rama del propio repo. Un PR
-   desde un fork no coincide con la condición, así que no puede ejecutarse en mi
-   Mac ni aprobándolo por error.
+2. The job is gated on the pull request coming from a branch of the repo
+   itself. A pull request from a fork does not match the condition, so it
+   cannot run on the Mac even if it gets approved by mistake.
 
-Este repo es público **por obligación**: un repo público no puede consumir
-workflows reusables de uno privado. Por eso la IP y el usuario de balthazar no
-están en el código, sino en secretos de cada repo de app.
+This repo is public **out of necessity**: a public repo cannot consume reusable
+workflows from a private one. That is why the cluster address and SSH user live
+in each app repo's Actions secrets instead of in this code.
 
-## Pendientes conocidos
+## Known gaps
 
-- **Vault**: hoy las properties vienen de secretos de Actions. Cuando Vault y
-  External Secrets estén arriba, cambia el origen, no el `launch.yml`.
-- **DNS**: el chart ya genera el Ingress si declaras `host`, pero hasta que
-  AdGuard resuelva `*.lab.home.arpa` se accede por `IP:NodePort`.
-- **Perfil `node`**: 3 de los 5 pipelines actuales son Node o frontends.
-- **Limpieza de previews olvidados**: falta la tarea que borre los de más de 24 h.
+- **Local DNS**: the chart already renders an Ingress when `host` is set, but
+  until AdGuard resolves `*.lab.home.arpa` apps are reached at `IP:NodePort`.
+- **Stale previews**: there is no job yet that deletes previews older than 24h.
+- **OpenBao unseal**: casper's OpenBao starts sealed after a reboot and needs
+  two unseal keys applied by hand.

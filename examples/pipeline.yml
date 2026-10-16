@@ -1,5 +1,5 @@
-# .github/workflows/pipeline.yml — idéntico en todos los repos de apps.
-# Solo dispara; toda la lógica vive en el repo pipelines.
+# .github/workflows/pipeline.yml — identical in every app repo.
+# It only triggers; all the logic lives in the pipelines repo.
 name: pipeline
 
 on:

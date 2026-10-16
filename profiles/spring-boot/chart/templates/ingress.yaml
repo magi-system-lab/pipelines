@@ -1,6 +1,6 @@
 {{- if .Values.host }}
-# Solo se crea si launch.yml declara "host". Queda listo para cuando
-# AdGuard resuelva *.lab.home.arpa hacia balthazar (fase 2).
+# Only created when launch.yml declares "host". Inert until AdGuard
+# resolves *.lab.home.arpa to balthazar (phase 2).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

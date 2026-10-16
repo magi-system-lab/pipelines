@@ -1,0 +1,30 @@
+# launch.yml — lives at the root of every app repo.
+# This is our own format, not GitHub's: portable if we ever move to Forgejo.
+profile: spring-boot          # spring-boot | node
+app: payments-api
+
+# Optional: use the repo's own Containerfile instead of the generic profile one.
+# Needed when the runtime image requires extra packages.
+# containerfile: Dockerfile
+
+# Defaults, applied to every environment
+port: 8081
+host: payments                # payments.lab.home.arpa in prod, payments-pr-12... in preview
+java-opts: "-Xms128m -Xmx384m"
+env:
+  TZ: America/Mexico_City
+
+# Each environment overrides whatever it repeats.
+# Rule: maps (env) merge per key; environment scalars win over the defaults.
+environments:
+
+  preview:                    # created on every pull request, deleted when it closes
+    env:
+      LOG_LEVEL: DEBUG
+
+  prod:
+    branches: [main]          # a pull request never deploys to prod
+    secrets:
+      # Only the OpenBao path and the shape. No value passes through CI.
+      - path: prod/payments-api
+        format: env           # env | properties | yaml

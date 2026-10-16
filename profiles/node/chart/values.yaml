@@ -1,0 +1,43 @@
+# Profile defaults. Whatever launch.yml declares is rendered into
+# values.generated.yaml and overrides this. Convention lives here:
+# memory, probes, user, priority.
+app: ""
+image: ""
+port: 3000
+env: {}
+
+priorityClass: preview-priority
+
+service:
+  # NodePort keeps apps reachable by IP until local DNS exists.
+  type: NodePort
+
+# Ingress is only created when launch.yml declares "host".
+host: ""
+
+# Secrets pulled from OpenBao by External Secrets Operator.
+# The pipeline never sees their values.
+externalSecrets:
+  # Materialised as env vars through envFrom.
+  env:
+    enabled: false
+    path: ""
+  # Materialised as a file under /config.
+  file:
+    enabled: false
+    path: ""
+    # file name to mount under /config
+    filename: .env
+  storeName: openbao
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+# TCP probes against the app port: no framework-specific endpoint required.
+probes:
+  readinessInitialDelay: 20
+  livenessInitialDelay: 60

@@ -1,5 +1,6 @@
-# Defaults del perfil. Lo que declara launch.yml se genera en values.generated.yaml
-# y sobrescribe esto. Aquí vive la convención: memoria, sondas, usuario, prioridad.
+# Profile defaults. Whatever launch.yml declares is rendered into
+# values.generated.yaml and overrides this. Convention lives here:
+# memory, probes, user, priority.
 app: ""
 image: ""
 port: 8080
@@ -9,20 +10,26 @@ env: {}
 priorityClass: preview-priority
 
 service:
-  # NodePort para que la app sea alcanzable por IP mientras no haya DNS local.
+  # NodePort keeps apps reachable by IP until local DNS exists.
   type: NodePort
 
-# Ingress solo si launch.yml declara "host". Hasta que exista AdGuard, queda inerte.
+# Ingress is only created when launch.yml declares "host".
 host: ""
 
-# Properties montadas en /config/application.properties desde un Secret.
-config:
-  enabled: false
-
-# Variables de entorno sensibles (contraseñas, tokens). Vienen de un Secret
-# creado por el pipeline, no de launch.yml: ahí solo van variables no sensibles.
-secretEnv:
-  enabled: false
+# Secrets pulled from OpenBao by External Secrets Operator.
+# The pipeline never sees their values.
+externalSecrets:
+  # Materialised as env vars through envFrom.
+  env:
+    enabled: false
+    path: ""
+  # Materialised as a file under /config.
+  file:
+    enabled: false
+    path: ""
+    # application.properties or application.yaml
+    filename: application.properties
+  storeName: openbao
 
 resources:
   requests:
@@ -31,8 +38,8 @@ resources:
   limits:
     memory: 512Mi
 
-# Sondas por TCP contra el puerto de la app: funcionan sin depender de
-# spring-boot-actuator, que no todas las apps incluyen.
+# TCP probes against the app port: they work without requiring
+# spring-boot-actuator, which not every app includes.
 probes:
   readinessInitialDelay: 20
   livenessInitialDelay: 60

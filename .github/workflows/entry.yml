@@ -1,65 +1,57 @@
-# Lector y decisor central. Los repos de apps solo lo invocan; toda la lógica vive aquí.
-# Si algún día migro a Forgejo, cambia este archivo, no los repos.
+# Central reader and dispatcher. App repos only call this workflow; all the
+# logic lives here, so migrating to another forge means changing this file
+# and not the repos.
 name: entry
 
 on:
   workflow_call:
     secrets:
-      # Datos de la red interna: no se escriben en el código porque este repo
-      # es público por obligación (un repo público no puede consumir workflows
-      # reusables de uno privado). Se definen como secretos en cada repo de app
-      # y llegan aquí con "secrets: inherit".
+      # Internal network coordinates. They are not written in the code because
+      # this repo has to be public: a public repo cannot consume reusable
+      # workflows from a private one. Each app repo defines them and they
+      # arrive here through "secrets: inherit".
       CLUSTER_HOST:
         required: true
       CLUSTER_USER:
         required: true
-      APP_PROPERTIES_PREVIEW:
-        required: false
-      APP_PROPERTIES_PROD:
-        required: false
-      # Variables de entorno sensibles, formato KEY=VALOR una por linea.
-      APP_SECRET_ENV_PREVIEW:
-        required: false
-      APP_SECRET_ENV_PROD:
-        required: false
 
 env:
   DOMAIN: lab.home.arpa
 
 jobs:
   deploy:
-    # Doble barrera de seguridad para repos públicos con runner en mi red:
-    #   1. GitHub exige aprobación para todo contribuidor externo.
-    #   2. Esta condición: un PR desde un fork NO coincide, así que ni aprobándolo
-    #      por error puede ejecutarse en mi Mac. Solo ramas del propio repo.
+    # Two safety barriers, because the repos are public and the runner lives
+    # on the home network:
+    #   1. GitHub requires approval for every external contributor.
+    #   2. This condition: a pull request from a fork does not match it, so it
+    #      cannot run on the Mac even if someone approves it by mistake.
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, homelab]
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
-      - name: Traer el código de la app
+      - name: Check out the app
         uses: actions/checkout@v5
 
-      - name: Traer los perfiles
+      - name: Check out the profiles
         uses: actions/checkout@v5
         with:
           repository: ivan0063/pipelines
           path: .pipelines
           ref: main
 
-      # macOS bloquea el acceso a la red local a binarios que no son de Apple
-      # cuando corren bajo launchd, así que kubectl y helm no alcanzan el :6443
-      # de balthazar. El ssh de Apple sí puede, así que tunelizamos por ahí y
-      # hablamos con 127.0.0.1. El kubeconfig que genera k3s ya apunta a
-      # localhost, por lo que el certificado valida sin tocar nada.
-      - name: Abrir túnel al API del cluster
+      # macOS denies local network access to non-Apple binaries running under
+      # launchd, so kubectl and helm cannot reach the cluster API directly.
+      # Apple's ssh can, so we forward the port and talk to 127.0.0.1, which is
+      # exactly what the kubeconfig k3s generates already points at, keeping
+      # certificate validation intact.
+      - name: Open a tunnel to the cluster API
         id: tunnel
         run: |
           set -euo pipefail
-          # Puerto propio por corrida: dos jobs simultáneos no se pisan.
           PORT=$(( 7000 + ${{ github.run_id }} % 2000 ))
           KCFG="$RUNNER_TEMP/kubeconfig"
 
@@ -77,21 +69,19 @@ jobs:
           echo "KUBECONFIG=$KCFG" >> "$GITHUB_ENV"
           echo "port=$PORT" >> "$GITHUB_OUTPUT"
           KUBECONFIG="$KCFG" kubectl version -o json >/dev/null
-          echo "túnel arriba en 127.0.0.1:$PORT y el API responde"
+          echo "tunnel up on 127.0.0.1:$PORT and the API answers"
 
-      - name: Leer launch.yml y decidir qué hacer
+      - name: Read launch.yml and decide what to do
         id: plan
         run: |
           set -euo pipefail
-          test -f launch.yml || { echo "::error::este repo no tiene launch.yml en la raíz"; exit 1; }
+          test -f launch.yml || { echo "::error::this repo has no launch.yml at its root"; exit 1; }
 
           PROFILE=$(yq -r '.profile' launch.yml)
           APP=$(yq -r '.app' launch.yml)
-          # Si el repo declara su propio Containerfile/Dockerfile, se respeta.
-          # Si no, se usa el genérico del perfil.
+          # A repo that needs a custom image declares its own Containerfile.
           CFILE=$(yq -r '.containerfile // ""' launch.yml)
 
-          # Qué ambiente, según el evento
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             ENVNAME=preview
             NS="pr-${{ github.event.pull_request.number }}"
@@ -101,7 +91,7 @@ jobs:
             ENVNAME=prod
             NS=prod
             PRIORITY=prod-priority
-            # Un push solo despliega si su rama está declarada en environments.prod.branches
+            # A push only deploys when its branch is listed in environments.prod.branches
             BRANCHES=$(yq -r '.environments.prod.branches // [] | join(" ")' launch.yml)
             case " $BRANCHES " in
               *" ${{ github.ref_name }} "*) ACTION=deploy ;;
@@ -109,14 +99,17 @@ jobs:
             esac
           fi
 
-          # La regla de mezcla: los mapas se fusionan por clave, los escalares
-          # del ambiente ganan sobre el default de arriba.
+          # Merge rule: maps merge per key, environment scalars win over defaults.
           PORT=$(yq -r ".environments.$ENVNAME.port // .port // 8080" launch.yml)
           JAVA_OPTS=$(yq -r ".environments.$ENVNAME.\"java-opts\" // .\"java-opts\" // \"\"" launch.yml)
           HOSTBASE=$(yq -r ".environments.$ENVNAME.host // .host // \"\"" launch.yml)
           yq -o=yaml ".env * (.environments.$ENVNAME.env // {})" launch.yml > /tmp/env.$$.yaml
 
-          # Nombre externo: prod usa el host tal cual, el preview lleva su número de PR
+          # Secrets: launch.yml only declares the OpenBao path and the shape.
+          # No value ever passes through CI.
+          SEC_PATH=$(yq -r ".environments.$ENVNAME.secrets[0].path // \"\"" launch.yml)
+          SEC_FORMAT=$(yq -r ".environments.$ENVNAME.secrets[0].format // \"env\"" launch.yml)
+
           HOST=""
           if [ -n "$HOSTBASE" ] && [ "$HOSTBASE" != "null" ]; then
             if [ "$ENVNAME" = "prod" ]; then HOST="$HOSTBASE.${{ env.DOMAIN }}";
@@ -135,109 +128,78 @@ jobs:
             echo "host=$HOST"
             echo "priority=$PRIORITY"
             echo "image=localhost/$APP:$TAG"
-            echo "containerfile=$CFILE"
             echo "envfile=/tmp/env.$$.yaml"
+            echo "containerfile=$CFILE"
+            echo "secret_path=$SEC_PATH"
+            echo "secret_format=$SEC_FORMAT"
           } >> "$GITHUB_OUTPUT"
 
-          echo "### Plan" >> "$GITHUB_STEP_SUMMARY"
-          echo "- perfil: \`$PROFILE\` · app: \`$APP\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- acción: \`$ACTION\` en namespace \`$NS\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Plan"
+            echo "- profile: \`$PROFILE\` · app: \`$APP\`"
+            echo "- action: \`$ACTION\` in namespace \`$NS\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      # ---------- PR cerrado: borrar su preview ----------
-      - name: Borrar el preview del PR cerrado
+      - name: Delete the preview of a closed pull request
         if: steps.plan.outputs.action == 'delete'
         run: |
           kubectl delete namespace "${{ steps.plan.outputs.ns }}" --ignore-not-found --wait=false
-          echo "- preview \`${{ steps.plan.outputs.ns }}\` borrado" >> "$GITHUB_STEP_SUMMARY"
+          echo "- preview \`${{ steps.plan.outputs.ns }}\` deleted" >> "$GITHUB_STEP_SUMMARY"
 
-      # ---------- Construir ----------
-      - name: Construir la imagen con Podman
+      - name: Build the image with Podman
         if: steps.plan.outputs.action == 'deploy'
         run: |
           set -euo pipefail
           CF="${{ steps.plan.outputs.containerfile }}"
           if [ -n "$CF" ]; then
-            echo "usando el Containerfile del repo: $CF"
+            echo "using the repo's own Containerfile: $CF"
           else
             CF=".pipelines/profiles/${{ steps.plan.outputs.profile }}/Containerfile"
-            echo "usando el Containerfile genérico del perfil"
+            echo "using the generic profile Containerfile"
           fi
           podman build -f "$CF" -t "${{ steps.plan.outputs.image }}" .
 
-      - name: Cargar la imagen en containerd de balthazar
+      - name: Load the image into balthazar's containerd
         if: steps.plan.outputs.action == 'deploy'
         run: |
           set -euo pipefail
-          # Sin registry: la imagen viaja por SSH y entra directo al containerd de k3s.
+          # No registry: the image travels over SSH straight into k3s containerd.
           podman save --format oci-archive "${{ steps.plan.outputs.image }}" \
             | ssh -i ~/.ssh/id_ed25519_balthazar_ci -o BatchMode=yes \
                   "${{ secrets.CLUSTER_USER }}@${{ secrets.CLUSTER_HOST }}" \
                   'sudo -n /usr/local/bin/k3s ctr images import -'
 
-      # ---------- Preparar el namespace ----------
-      - name: Preparar namespace y tope de recursos
+      - name: Prepare the namespace and its resource cap
         if: steps.plan.outputs.action == 'deploy'
         run: |
           set -euo pipefail
           kubectl create namespace "${{ steps.plan.outputs.ns }}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
-          # Los previews llevan tope de CPU y memoria; prod no se limita por namespace.
-          # Imperativo en vez de heredoc: un heredoc indentado dentro de "run: |"
-          # no cierra, porque bash exige el delimitador en la columna cero.
+          # Previews get a CPU and memory cap; prod is not capped per namespace.
           if [ "${{ steps.plan.outputs.env }}" = "preview" ]; then
             kubectl -n "${{ steps.plan.outputs.ns }}" create quota preview-quota \
               --hard=requests.cpu=500m,requests.memory=512Mi,limits.memory=1Gi,pods=4 \
               --dry-run=client -o yaml | kubectl apply -f -
           fi
 
-      - name: Montar las properties como Secret
+      - name: Deploy with Helm
         if: steps.plan.outputs.action == 'deploy'
-        env:
-          PROPS_PREVIEW: ${{ secrets.APP_PROPERTIES_PREVIEW }}
-          PROPS_PROD: ${{ secrets.APP_PROPERTIES_PROD }}
         run: |
           set -euo pipefail
-          if [ "${{ steps.plan.outputs.env }}" = "prod" ]; then PROPS="$PROPS_PROD"; else PROPS="$PROPS_PREVIEW"; fi
-          if [ -n "${PROPS:-}" ]; then
-            printf '%s' "$PROPS" > /tmp/application.properties
-            kubectl -n "${{ steps.plan.outputs.ns }}" create secret generic \
-              "${{ steps.plan.outputs.app }}-config" \
-              --from-file=application.properties=/tmp/application.properties \
-              --dry-run=client -o yaml | kubectl apply -f -
-            rm -f /tmp/application.properties
-            echo "CONFIG_ENABLED=true" >> "$GITHUB_ENV"
-          else
-            echo "CONFIG_ENABLED=false" >> "$GITHUB_ENV"
-            echo "- sin properties: no hay secret de Actions para este ambiente" >> "$GITHUB_STEP_SUMMARY"
+          SEC_PATH="${{ steps.plan.outputs.secret_path }}"
+          SEC_FORMAT="${{ steps.plan.outputs.secret_format }}"
+          ENV_ENABLED=false; FILE_ENABLED=false; FILENAME=application.properties
+          if [ -n "$SEC_PATH" ]; then
+            case "$SEC_FORMAT" in
+              env)        ENV_ENABLED=true ;;
+              properties) FILE_ENABLED=true; FILENAME=application.properties ;;
+              yaml)       FILE_ENABLED=true; FILENAME=application.yaml ;;
+              *) echo "::error::unknown secret format '$SEC_FORMAT' (use env, properties or yaml)"; exit 1 ;;
+            esac
           fi
 
-      # ---------- Desplegar ----------
-      - name: Montar las variables de entorno sensibles
-        if: steps.plan.outputs.action == 'deploy'
-        env:
-          SENV_PREVIEW: ${{ secrets.APP_SECRET_ENV_PREVIEW }}
-          SENV_PROD: ${{ secrets.APP_SECRET_ENV_PROD }}
-        run: |
-          set -euo pipefail
-          if [ "${{ steps.plan.outputs.env }}" = "prod" ]; then SENV="$SENV_PROD"; else SENV="$SENV_PREVIEW"; fi
-          if [ -n "${SENV:-}" ]; then
-            printf '%s' "$SENV" > /tmp/senv.env
-            kubectl -n "${{ steps.plan.outputs.ns }}" create secret generic \
-              "${{ steps.plan.outputs.app }}-env" \
-              --from-env-file=/tmp/senv.env \
-              --dry-run=client -o yaml | kubectl apply -f -
-            rm -f /tmp/senv.env
-            echo "SECRET_ENV_ENABLED=true" >> "$GITHUB_ENV"
-          else
-            echo "SECRET_ENV_ENABLED=false" >> "$GITHUB_ENV"
-          fi
-
-      - name: Desplegar con Helm
-        if: steps.plan.outputs.action == 'deploy'
-        run: |
-          set -euo pipefail
-          # launch.yml se traduce a valores del chart; el chart aporta la convención.
+          # launch.yml becomes chart values; the chart supplies the convention.
           cat > /tmp/values.generated.yaml <<EOF
           app: "${{ steps.plan.outputs.app }}"
           image: "${{ steps.plan.outputs.image }}"
@@ -245,10 +207,15 @@ jobs:
           javaOpts: "${{ steps.plan.outputs.java_opts }}"
           priorityClass: "${{ steps.plan.outputs.priority }}"
           host: "${{ steps.plan.outputs.host }}"
-          config:
-            enabled: ${CONFIG_ENABLED}
-          secretEnv:
-            enabled: ${SECRET_ENV_ENABLED}
+          externalSecrets:
+            storeName: openbao
+            env:
+              enabled: ${ENV_ENABLED}
+              path: "${SEC_PATH}"
+            file:
+              enabled: ${FILE_ENABLED}
+              path: "${SEC_PATH}"
+              filename: "${FILENAME}"
           EOF
           yq -i ".env = load(\"${{ steps.plan.outputs.envfile }}\")" /tmp/values.generated.yaml
 
@@ -256,16 +223,15 @@ jobs:
             ".pipelines/profiles/${{ steps.plan.outputs.profile }}/chart" \
             --namespace "${{ steps.plan.outputs.ns }}" \
             -f /tmp/values.generated.yaml \
-            --wait --timeout 5m
+            --wait --timeout 8m
 
-      - name: Resumen del despliegue
+      - name: Deployment summary
         if: steps.plan.outputs.action == 'deploy'
         run: |
           set -euo pipefail
           NS="${{ steps.plan.outputs.ns }}"
           APP="${{ steps.plan.outputs.app }}"
           NODEPORT=$(kubectl -n "$NS" get svc "$APP" -o jsonpath='{.spec.ports[0].nodePort}')
-
           {
             echo ""
             echo "## ${APP} → ${{ steps.plan.outputs.env }}"
@@ -274,11 +240,14 @@ jobs:
             echo "|---|---|"
             echo "| **URL** | http://${{ secrets.CLUSTER_HOST }}:\$NODEPORT |"
             echo "| Namespace | \`$NS\` |"
-            echo "| Imagen | \`${{ steps.plan.outputs.image }}\` |"
-            echo "| Prioridad | \`${{ steps.plan.outputs.priority }}\` |"
+            echo "| Image | \`${{ steps.plan.outputs.image }}\` |"
+            echo "| Priority | \`${{ steps.plan.outputs.priority }}\` |"
             echo "| Commit | \`${{ github.sha }}\` |"
+            if [ -n "${{ steps.plan.outputs.secret_path }}" ]; then
+              echo "| Secrets | OpenBao \`${{ steps.plan.outputs.secret_path }}\` as \`${{ steps.plan.outputs.secret_format }}\` |"
+            fi
             if [ -n "${{ steps.plan.outputs.host }}" ]; then
-              echo "| Con DNS (fase 2) | http://${{ steps.plan.outputs.host }} |"
+              echo "| With local DNS (phase 2) | http://${{ steps.plan.outputs.host }} |"
             fi
             echo ""
             echo "### Pods"
@@ -288,34 +257,38 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Lo que de verdad sirve cuando algo falla: el estado del cluster queda
-      # en la corrida, sin tener que entrar a balthazar a investigar.
-      - name: Diagnóstico si algo falló
+      # What actually helps on a failure: cluster state lands in the run, so
+      # there is no need to go digging on balthazar.
+      - name: Diagnostics on failure
         if: failure() && steps.plan.outputs.action == 'deploy'
         run: |
           NS="${{ steps.plan.outputs.ns }}"
           APP="${{ steps.plan.outputs.app }}"
           {
             echo ""
-            echo "## ❌ Diagnóstico"
+            echo "## Diagnostics"
             echo ""
-            echo "### Eventos del namespace"
+            echo "### Namespace events"
             echo '```'
             kubectl -n "$NS" get events --sort-by=.lastTimestamp 2>&1 | tail -25 || true
             echo '```'
-            echo "### Estado de los pods"
+            echo "### External secrets"
+            echo '```'
+            kubectl -n "$NS" get externalsecrets 2>&1 || true
+            echo '```'
+            echo "### Pod status"
             echo '```'
             kubectl -n "$NS" describe pods -l app.kubernetes.io/name="$APP" 2>&1 \
               | grep -A12 -E "^(Name:|Status:|Events:)" | head -60 || true
             echo '```'
-            echo "### Últimas líneas del log de la app"
+            echo "### Last lines of the app log"
             echo '```'
             kubectl -n "$NS" logs -l app.kubernetes.io/name="$APP" --tail=50 --all-containers 2>&1 | tail -50 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Cerrar el túnel
+      - name: Close the tunnel
         if: always() && steps.tunnel.outputs.port != ''
         run: |
           pkill -f "127.0.0.1:6443" 2>/dev/null || true
-          echo "túnel cerrado"
+          echo "tunnel closed"

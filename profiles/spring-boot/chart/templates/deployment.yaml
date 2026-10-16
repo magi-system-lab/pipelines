@@ -12,14 +12,15 @@ spec:
     metadata:
       labels: {{- include "sb.labels" . | nindent 8 }}
       annotations:
-        # Fuerza un rollout cuando cambian las properties, sin necesitar Reloader.
-        checksum/config: {{ printf "%v-%v" .Values.config .Values.secretEnv | sha256sum }}
+        # Rolls the pod when the image changes. Secret rotation is handled by
+        # External Secrets refreshing the Secret in place.
+        checksum/image: {{ .Values.image | sha256sum }}
     spec:
       priorityClassName: {{ .Values.priorityClass }}
       containers:
         - name: app
           image: {{ .Values.image }}
-          # La imagen se carga con "k3s ctr images import": nunca se baja de un registry.
+          # Images are loaded with "k3s ctr images import": never pulled from a registry.
           imagePullPolicy: Never
           ports:
             - name: http
@@ -35,12 +36,12 @@ spec:
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}
-          {{- if .Values.secretEnv.enabled }}
+          {{- if .Values.externalSecrets.env.enabled }}
           envFrom:
             - secretRef:
                 name: {{ include "sb.name" . }}-env
           {{- end }}
-          {{- if .Values.config.enabled }}
+          {{- if .Values.externalSecrets.file.enabled }}
           volumeMounts:
             - name: config
               mountPath: /config
@@ -57,7 +58,7 @@ spec:
             initialDelaySeconds: {{ .Values.probes.livenessInitialDelay }}
             periodSeconds: 20
           resources: {{- toYaml .Values.resources | nindent 12 }}
-      {{- if .Values.config.enabled }}
+      {{- if .Values.externalSecrets.file.enabled }}
       volumes:
         - name: config
           secret:
