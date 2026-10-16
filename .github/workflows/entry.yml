@@ -309,5 +309,7 @@ jobs:
       - name: Close the tunnel
         if: always() && steps.tunnel.outputs.port != ''
         run: |
-          pkill -f "127.0.0.1:6443" 2>/dev/null || true
-          echo "tunnel closed"
+          # Match this run's own local port. A bare "127.0.0.1:6443" pattern
+          # would also kill the tunnels of other repos' runners on this host.
+          pkill -f "${{ steps.tunnel.outputs.port }}:127.0.0.1:6443" 2>/dev/null || true
+          echo "tunnel closed on port ${{ steps.tunnel.outputs.port }}"
