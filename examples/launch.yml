@@ -3,8 +3,12 @@
 profile: spring-boot          # spring-boot | node
 app: payments-api
 
-# Optional: use the repo's own Containerfile instead of the generic profile one.
-# Needed when the runtime image requires extra packages.
+# Optional: extra OS packages for the runtime image. Prefer this over keeping a
+# Dockerfile in the repo, so the app carries no build definition at all.
+# packages: [tesseract-ocr, tesseract-ocr-spa]
+
+# Optional and rarely needed: use the repo's own Containerfile instead of the
+# generic profile one. Only for images the packages key cannot express.
 # containerfile: Dockerfile
 
 # Defaults, applied to every environment

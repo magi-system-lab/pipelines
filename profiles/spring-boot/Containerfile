@@ -23,6 +23,16 @@ RUN set -eux; \
     fi
 
 FROM docker.io/library/eclipse-temurin:21-jre
+# Extra runtime packages declared in launch.yml, for apps whose image needs
+# more than a JRE (for example Tesseract OCR). Empty by default, so the image
+# stays minimal unless an app asks for something.
+ARG EXTRA_PACKAGES=""
+RUN set -eux; \
+    if [ -n "$EXTRA_PACKAGES" ]; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends $EXTRA_PACKAGES; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
 RUN useradd -r -u 1001 -m -d /app spring
 WORKDIR /app
 COPY --from=build /tmp/app.jar /app/app.jar

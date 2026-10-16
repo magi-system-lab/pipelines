@@ -88,6 +88,9 @@ jobs:
           APP=$(yq -r '.app' launch.yml)
           # A repo that needs a custom image declares its own Containerfile.
           CFILE=$(yq -r '.containerfile // ""' launch.yml)
+          # Extra runtime packages, so an app needing more than the base image
+          # still does not have to carry its own Containerfile.
+          PKGS=$(yq -r '.packages // [] | join(" ")' launch.yml)
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             ENVNAME=preview
@@ -124,6 +127,7 @@ jobs:
           echo "$APP"     | grep -Eq '^[a-z0-9][a-z0-9-]{0,40}$'   || { echo "::error::invalid app name: $APP"; exit 1; }
           echo "$PORT"    | grep -Eq '^[0-9]{2,5}$'                || { echo "::error::invalid port: $PORT"; exit 1; }
           echo "$CFILE"   | grep -Eq '^[A-Za-z0-9._/-]{0,100}$'    || { echo "::error::invalid containerfile path"; exit 1; }
+          echo "$PKGS"    | grep -Eq '^[a-z0-9 .+-]{0,200}$'        || { echo "::error::invalid packages list"; exit 1; }
           echo "$SEC_PATH"| grep -Eq '^[a-z0-9/_-]{0,60}$'         || { echo "::error::invalid secret path"; exit 1; }
           echo "$SEC_FORMAT" | grep -Eq '^(env|properties|yaml)$'  || { echo "::error::invalid secret format"; exit 1; }
           echo "$HOSTBASE"| grep -Eq '^[a-z0-9-]{0,40}$'           || { echo "::error::invalid host"; exit 1; }
@@ -149,6 +153,7 @@ jobs:
             echo "image=localhost/$APP:$TAG"
             echo "envfile=/tmp/env.$$.yaml"
             echo "containerfile=$CFILE"
+            echo "packages=$PKGS"
             echo "secret_path=$SEC_PATH"
             echo "secret_format=$SEC_FORMAT"
           } >> "$GITHUB_OUTPUT"
@@ -176,7 +181,9 @@ jobs:
             CF=".pipelines/profiles/${{ steps.plan.outputs.profile }}/Containerfile"
             echo "using the generic profile Containerfile"
           fi
-          podman build -f "$CF" -t "${{ steps.plan.outputs.image }}" .
+          podman build -f "$CF" \
+            --build-arg EXTRA_PACKAGES="${{ steps.plan.outputs.packages }}" \
+            -t "${{ steps.plan.outputs.image }}" .
 
       - name: Load the image into balthazar's containerd
         if: steps.plan.outputs.action == 'deploy'

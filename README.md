@@ -38,10 +38,37 @@ Deployment profiles for the homelab. App repos carry no CI logic: just a
 
 ## Profiles
 
-| Profile | Build | Port variable | Secret file default |
-|---|---|---|---|
-| `spring-boot` | Maven or Gradle, auto-detected | `SERVER_PORT` | `/config/application.properties` |
-| `node` | `npm ci --omit=dev`, runs `npm start` | `PORT` | `/config/.env` |
+| Profile | Build | Port variable | Extra packages | Secret file default |
+|---|---|---|---|---|
+| `spring-boot` | Maven or Gradle, auto-detected | `SERVER_PORT` | `apt` | `/config/application.properties` |
+| `node` | `npm ci --omit=dev`, runs `npm start` | `PORT` | `apk` | `/config/.env` |
+
+App repos are not meant to carry a build definition. If the runtime image needs
+more than the base image, declare it:
+
+```yaml
+packages: [tesseract-ocr, tesseract-ocr-spa]
+```
+
+`containerfile:` remains as an escape hatch for images that `packages` cannot
+express, but reaching for it should be rare.
+
+## What each deploy leaves behind
+
+Every deploy produces an image of roughly half a gigabyte on each side, so both
+are cleaned up:
+
+- **Builder**: the pipeline drops its local copy of the image as soon as the
+  cluster has it. Build cache layers are kept, because they are what makes the
+  next build fast.
+- **Node**: `cluster/gc.sh` runs daily from a systemd timer. It deletes preview
+  namespaces older than 24h, then any locally imported image that no Deployment,
+  StatefulSet, DaemonSet, ReplicaSet or Pod references.
+
+ReplicaSets count as references on purpose. They are what `kubectl rollout undo`
+needs, and with no registry a deleted image cannot be pulled back, so the number
+of retained revisions is also the number of rollbacks available.
+`revisionHistoryLimit: 3` in both charts bounds it.
 
 ## Security
 

@@ -7,6 +7,12 @@ COPY package*.json ./
 RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
 
 FROM docker.io/library/node:22-alpine
+# Extra runtime packages declared in launch.yml. Alpine, so apk rather than apt.
+ARG EXTRA_PACKAGES=""
+RUN set -eux; \
+    if [ -n "$EXTRA_PACKAGES" ]; then \
+        apk add --no-cache $EXTRA_PACKAGES; \
+    fi
 RUN addgroup -S app && adduser -S app -G app
 WORKDIR /app
 COPY --from=deps /src/node_modules ./node_modules
