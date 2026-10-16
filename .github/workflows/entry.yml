@@ -188,6 +188,17 @@ jobs:
                   "${{ secrets.CLUSTER_USER }}@${{ secrets.CLUSTER_HOST }}" \
                   'sudo -n /usr/local/bin/k3s ctr images import -'
 
+      # The image lives in the cluster's containerd from here on, so the copy in
+      # the builder's store is dead weight: around 500 MB per deploy. Build
+      # cache layers are kept on purpose, since they are what makes the next
+      # Maven or npm build fast.
+      - name: Drop the local copy of the image
+        if: steps.plan.outputs.action == 'deploy'
+        run: |
+          podman rmi "${{ steps.plan.outputs.image }}" 2>/dev/null || true
+          podman image prune -f >/dev/null 2>&1 || true
+          echo "builder store now: $(podman system df --format '{{.TotalCount}} images, {{.Size}}' 2>/dev/null | head -1)"
+
       - name: Prepare the namespace and its resource cap
         if: steps.plan.outputs.action == 'deploy'
         run: |

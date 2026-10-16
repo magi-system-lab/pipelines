@@ -5,6 +5,10 @@ metadata:
   labels: {{- include "sb.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  # Bounded rollback history. Each retained revision keeps its image alive on
+  # the node, and without a registry a deleted image cannot be pulled back, so
+  # this number is also the number of revisions we can actually roll back to.
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ .Values.app }}
