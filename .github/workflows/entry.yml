@@ -44,7 +44,7 @@ jobs:
       - name: Check out the profiles
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          repository: ivan0063/pipelines
+          repository: magi-system-lab/pipelines
           path: .pipelines
           ref: main
 

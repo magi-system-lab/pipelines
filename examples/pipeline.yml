@@ -9,5 +9,5 @@ on:
 
 jobs:
   run:
-    uses: ivan0063/pipelines/.github/workflows/entry.yml@main
+    uses: magi-system-lab/pipelines/.github/workflows/entry.yml@main
     secrets: inherit
