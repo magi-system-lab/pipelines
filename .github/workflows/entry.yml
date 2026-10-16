@@ -50,6 +50,35 @@ jobs:
           path: .pipelines
           ref: main
 
+      # macOS bloquea el acceso a la red local a binarios que no son de Apple
+      # cuando corren bajo launchd, así que kubectl y helm no alcanzan el :6443
+      # de balthazar. El ssh de Apple sí puede, así que tunelizamos por ahí y
+      # hablamos con 127.0.0.1. El kubeconfig que genera k3s ya apunta a
+      # localhost, por lo que el certificado valida sin tocar nada.
+      - name: Abrir túnel al API del cluster
+        id: tunnel
+        run: |
+          set -euo pipefail
+          # Puerto propio por corrida: dos jobs simultáneos no se pisan.
+          PORT=$(( 7000 + ${{ github.run_id }} % 2000 ))
+          KCFG="$RUNNER_TEMP/kubeconfig"
+
+          ssh -i ~/.ssh/id_ed25519_balthazar_ci -o BatchMode=yes \
+              "${{ secrets.CLUSTER_USER }}@${{ secrets.CLUSTER_HOST }}" \
+              'cat /etc/rancher/k3s/k3s.yaml' > "$KCFG"
+          chmod 600 "$KCFG"
+          sed -i '' "s#https://127.0.0.1:6443#https://127.0.0.1:$PORT#" "$KCFG"
+
+          ssh -i ~/.ssh/id_ed25519_balthazar_ci -o BatchMode=yes \
+              -o ExitOnForwardFailure=yes -fN \
+              -L "$PORT:127.0.0.1:6443" \
+              "${{ secrets.CLUSTER_USER }}@${{ secrets.CLUSTER_HOST }}"
+
+          echo "KUBECONFIG=$KCFG" >> "$GITHUB_ENV"
+          echo "port=$PORT" >> "$GITHUB_OUTPUT"
+          KUBECONFIG="$KCFG" kubectl version -o json >/dev/null
+          echo "túnel arriba en 127.0.0.1:$PORT y el API responde"
+
       - name: Leer launch.yml y decidir qué hacer
         id: plan
         run: |
@@ -154,20 +183,12 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
 
           # Los previews llevan tope de CPU y memoria; prod no se limita por namespace.
+          # Imperativo en vez de heredoc: un heredoc indentado dentro de "run: |"
+          # no cierra, porque bash exige el delimitador en la columna cero.
           if [ "${{ steps.plan.outputs.env }}" = "preview" ]; then
-            cat <<EOF | kubectl apply -f -
-          apiVersion: v1
-          kind: ResourceQuota
-          metadata:
-            name: preview-quota
-            namespace: ${{ steps.plan.outputs.ns }}
-          spec:
-            hard:
-              requests.cpu: "500m"
-              requests.memory: 512Mi
-              limits.memory: 1Gi
-              pods: "4"
-          EOF
+            kubectl -n "${{ steps.plan.outputs.ns }}" create quota preview-quota \
+              --hard=requests.cpu=500m,requests.memory=512Mi,limits.memory=1Gi,pods=4 \
+              --dry-run=client -o yaml | kubectl apply -f -
           fi
 
       - name: Montar las properties como Secret
@@ -292,3 +313,9 @@ jobs:
             kubectl -n "$NS" logs -l app.kubernetes.io/name="$APP" --tail=50 --all-containers 2>&1 | tail -50 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cerrar el túnel
+        if: always() && steps.tunnel.outputs.port != ''
+        run: |
+          pkill -f "127.0.0.1:6443" 2>/dev/null || true
+          echo "túnel cerrado"
