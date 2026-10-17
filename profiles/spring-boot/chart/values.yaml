@@ -5,7 +5,10 @@ app: ""
 image: ""
 port: 8080
 javaOpts: ""
-env: {}
+# Convention for every app in the homelab. launch.yml env adds to it or
+# overrides it key by key.
+env:
+  TZ: America/Mexico_City
 
 priorityClass: preview-priority
 

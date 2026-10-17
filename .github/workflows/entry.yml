@@ -95,12 +95,15 @@ jobs:
         id: plan
         env:
           REF_NAME: ${{ github.ref_name }}
+          REPO_NAME: ${{ github.event.repository.name }}
         run: |
           set -euo pipefail
           test -f launch.yml || { echo "::error::this repo has no launch.yml at its root"; exit 1; }
 
           PROFILE=$(yq -r '.profile' launch.yml)
-          APP=$(yq -r '.app' launch.yml)
+          # Defaults to the repository name, so most repos do not need to declare it.
+          APP=$(yq -r '.app // ""' launch.yml)
+          [ -n "$APP" ] || APP=$(echo "$REPO_NAME" | tr '[:upper:]_' '[:lower:]-')
           # A repo that needs a custom image declares its own Containerfile.
           CFILE=$(yq -r '.containerfile // ""' launch.yml)
           # Extra runtime packages, so an app needing more than the base image
@@ -117,7 +120,8 @@ jobs:
             NS=prod
             PRIORITY=prod-priority
             # A push only deploys when its branch is listed in environments.prod.branches
-            BRANCHES=$(yq -r '.environments.prod.branches // [] | join(" ")' launch.yml)
+            # Defaults to main.
+            BRANCHES=$(yq -r '.environments.prod.branches // ["main"] | join(" ")' launch.yml)
             # REF_NAME comes through the environment, never interpolated into the
             # script body, so a crafted branch name cannot inject shell.
             case " $BRANCHES " in
@@ -132,12 +136,19 @@ jobs:
           HOSTBASE=$(yq -r ".environments.$ENVNAME.host // .host // \"\"" launch.yml)
           # Per environment only: a fixed port shared by prod and a preview would collide.
           NODEPORT=$(yq -r ".environments.$ENVNAME.\"node-port\" // \"\"" launch.yml)
-          yq -o=yaml ".env * (.environments.$ENVNAME.env // {})" launch.yml > "$RUNNER_TEMP/env.yaml"
+          yq -o=yaml "(.env // {}) * (.environments.$ENVNAME.env // {})" launch.yml > "$RUNNER_TEMP/env.yaml"
 
           # Secrets: launch.yml only declares the OpenBao path and the shape.
           # No value ever passes through CI.
-          SEC_PATH=$(yq -r ".environments.$ENVNAME.secrets[0].path // \"\"" launch.yml)
-          SEC_FORMAT=$(yq -r ".environments.$ENVNAME.secrets[0].format // \"env\"" launch.yml)
+          # Convention: <environment>/<app> as env vars, unless launch.yml says
+          # otherwise. "secrets: []" opts out, for an environment with no secret.
+          SEC_KIND=$(yq -r ".environments.$ENVNAME.secrets | tag" launch.yml)
+          if [ "$SEC_KIND" = "!!null" ]; then
+            SEC_PATH="$ENVNAME/$APP"; SEC_FORMAT=env
+          else
+            SEC_PATH=$(yq -r ".environments.$ENVNAME.secrets[0].path // \"\"" launch.yml)
+            SEC_FORMAT=$(yq -r ".environments.$ENVNAME.secrets[0].format // \"env\"" launch.yml)
+          fi
 
           # launch.yml is untrusted input: validate before anything reaches a shell.
           echo "$PROFILE" | grep -Eq '^(spring-boot|node)$'        || { echo "::error::invalid profile: $PROFILE"; exit 1; }
