@@ -1,0 +1,33 @@
+# Read-only identity to log in to Headlamp. The built-in "view" role reads pods,
+# logs, events, deployments and services in every namespace, but not Secrets,
+# and cannot change anything.
+#
+# Get the login token (it does not expire while this Secret exists):
+#   kubectl -n headlamp get secret headlamp-viewer-token -o jsonpath='{.data.token}' | base64 -d
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: headlamp-viewer
+  namespace: headlamp
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: headlamp-viewer-token
+  namespace: headlamp
+  annotations:
+    kubernetes.io/service-account.name: headlamp-viewer
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: headlamp-viewer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: headlamp-viewer
+    namespace: headlamp
