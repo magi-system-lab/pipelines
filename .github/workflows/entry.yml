@@ -190,14 +190,29 @@ jobs:
         run: |
           set -euo pipefail
           CF="${{ steps.plan.outputs.containerfile }}"
+          PKGS="${{ steps.plan.outputs.packages }}"
           if [ -n "$CF" ]; then
             echo "using the repo's own Containerfile: $CF"
           else
             CF=".pipelines/profiles/${{ steps.plan.outputs.profile }}/Containerfile"
             echo "using the generic profile Containerfile"
+            # Tag the slow-changing stages so the prune after the deploy keeps
+            # them: the next build reuses them instead of reinstalling the
+            # toolchain and the runtime packages. Re-tagging moves the name, and
+            # the stale version becomes untagged and gets pruned.
+            case "${{ steps.plan.outputs.profile }}" in
+              spring-boot) STAGES="toolchain runtime-base" ;;
+              node)        STAGES="deps runtime-base" ;;
+            esac
+            for STAGE in $STAGES; do
+              podman build -q -f "$CF" --target "$STAGE" \
+                --build-arg EXTRA_PACKAGES="$PKGS" \
+                -t "localhost/cache/${{ steps.plan.outputs.app }}-$STAGE:latest" . >/dev/null
+              echo "cache stage ready: $STAGE"
+            done
           fi
           podman build -f "$CF" \
-            --build-arg EXTRA_PACKAGES="${{ steps.plan.outputs.packages }}" \
+            --build-arg EXTRA_PACKAGES="$PKGS" \
             -t "${{ steps.plan.outputs.image }}" .
 
       - name: Load the image into balthazar's containerd
