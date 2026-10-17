@@ -16,15 +16,15 @@ RUN --mount=type=cache,target=/root/.m2 \
     --mount=type=tmpfs,target=/src/build \
     set -eux; \
     if [ -x ./gradlew ]; then \
-        ./gradlew --no-daemon clean bootJar -x test; \
+        ./gradlew --no-daemon bootJar -x test; \
         cp build/libs/*.jar /tmp/app.jar; \
     elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then \
         echo "build.gradle without a wrapper: commit the Gradle wrapper" >&2; exit 1; \
     elif [ -x ./mvnw ]; then \
-        ./mvnw -B -ntp clean package -DskipTests; \
+        ./mvnw -B -ntp package -DskipTests; \
         cp target/*.jar /tmp/app.jar; \
     elif [ -f pom.xml ]; then \
-        mvn -B -ntp clean package -DskipTests; \
+        mvn -B -ntp package -DskipTests; \
         cp target/*.jar /tmp/app.jar; \
     else \
         echo "no pom.xml and no build.gradle: cannot tell which build system to use" >&2; exit 1; \
