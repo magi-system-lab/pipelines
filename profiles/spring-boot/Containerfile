@@ -1,28 +1,43 @@
 # Generic Containerfile for the spring-boot profile.
 # Detects Maven or Gradle on its own: nothing app-specific belongs here.
 # A repo that needs a custom image declares "containerfile" in its launch.yml.
+#
+# The "toolchain" and "runtime-base" stages are tagged by the pipeline as
+# cache images. Untagged layers are pruned after every deploy, so without the
+# tags each build would reinstall Maven and the runtime packages from scratch.
 
-FROM docker.io/library/eclipse-temurin:21-jdk AS build
-WORKDIR /src
+FROM docker.io/library/eclipse-temurin:21-jdk AS toolchain
 RUN apt-get update && apt-get install -y --no-install-recommends maven && rm -rf /var/lib/apt/lists/*
+
+FROM toolchain AS build
+WORKDIR /src
 COPY . .
-RUN set -eux; \
+# Dependency caches persist across builds, so Maven and Gradle download them
+# once instead of on every deploy. Build output goes to tmpfs: thousands of
+# small class files never hit the builder's disk (a microSD on balthazar), and
+# only the final jar is copied into the layer. No "clean" goal: target/ and
+# build/ are fresh mount points that cannot be deleted.
+RUN --mount=type=cache,target=/root/.m2 \
+    --mount=type=cache,target=/root/.gradle \
+    --mount=type=tmpfs,target=/src/target \
+    --mount=type=tmpfs,target=/src/build \
+    set -eux; \
     if [ -x ./gradlew ]; then \
-        ./gradlew --no-daemon clean bootJar -x test; \
+        ./gradlew --no-daemon bootJar -x test; \
         cp build/libs/*.jar /tmp/app.jar; \
     elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then \
         echo "build.gradle without a wrapper: commit the Gradle wrapper" >&2; exit 1; \
     elif [ -x ./mvnw ]; then \
-        ./mvnw -B -ntp clean package -DskipTests; \
+        ./mvnw -B -ntp package -DskipTests; \
         cp target/*.jar /tmp/app.jar; \
     elif [ -f pom.xml ]; then \
-        mvn -B -ntp clean package -DskipTests; \
+        mvn -B -ntp package -DskipTests; \
         cp target/*.jar /tmp/app.jar; \
     else \
         echo "no pom.xml and no build.gradle: cannot tell which build system to use" >&2; exit 1; \
     fi
 
-FROM docker.io/library/eclipse-temurin:21-jre
+FROM docker.io/library/eclipse-temurin:21-jre AS runtime-base
 # Extra runtime packages declared in launch.yml, for apps whose image needs
 # more than a JRE (for example Tesseract OCR). Empty by default, so the image
 # stays minimal unless an app asks for something.
@@ -33,10 +48,13 @@ RUN set -eux; \
         apt-get install -y --no-install-recommends $EXTRA_PACKAGES; \
         rm -rf /var/lib/apt/lists/*; \
     fi
-RUN useradd -r -u 1001 -m -d /app spring
+RUN useradd -r -u 1001 -m -d /app spring \
+    && mkdir -p /config && chown spring:spring /config
+
+FROM runtime-base
 WORKDIR /app
-COPY --from=build /tmp/app.jar /app/app.jar
-RUN mkdir -p /config && chown -R spring:spring /app /config
+# --chown instead of a later "chown -R": that would copy the jar into a second layer.
+COPY --from=build --chown=spring:spring /tmp/app.jar /app/app.jar
 USER spring
 # Mounted by the chart when launch.yml declares a secret with format properties|yaml.
 ENV SPRING_CONFIG_ADDITIONAL_LOCATION=file:/config/

@@ -1,23 +1,33 @@
 # Generic Containerfile for the node profile.
 # Installs production dependencies only and runs the package's start script.
+#
+# The "deps" and "runtime-base" stages are tagged by the pipeline as cache
+# images. Untagged layers are pruned after every deploy, so without the tags
+# each build would reinstall node_modules and the runtime packages.
 
 FROM docker.io/library/node:22-alpine AS deps
 WORKDIR /src
 COPY package*.json ./
-RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
+# The npm cache persists across builds, so packages are downloaded once.
+RUN --mount=type=cache,target=/root/.npm \
+    if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
 
-FROM docker.io/library/node:22-alpine
+FROM docker.io/library/node:22-alpine AS runtime-base
 # Extra runtime packages declared in launch.yml. Alpine, so apk rather than apt.
 ARG EXTRA_PACKAGES=""
 RUN set -eux; \
     if [ -n "$EXTRA_PACKAGES" ]; then \
         apk add --no-cache $EXTRA_PACKAGES; \
     fi
-RUN addgroup -S app && adduser -S app -G app
+RUN addgroup -S app && adduser -S app -G app \
+    && mkdir -p /app /config && chown app:app /app /config
+
+FROM runtime-base
 WORKDIR /app
-COPY --from=deps /src/node_modules ./node_modules
-COPY . .
-RUN mkdir -p /config && chown -R app:app /app /config
+# --chown instead of a later "chown -R": that would copy node_modules and the
+# code into a second layer.
+COPY --from=deps --chown=app:app /src/node_modules ./node_modules
+COPY --chown=app:app . .
 USER app
 ENV NODE_ENV=production
 # PORT is injected by the chart from launch.yml.
