@@ -1,7 +1,15 @@
 # launch.yml — lives at the root of every app repo.
 # This is our own format, not GitHub's: portable if we ever move to Forgejo.
+#
+# Only declare what differs from the convention. Without anything else:
+#   app       the repository name
+#   port      8080
+#   env       TZ=America/Mexico_City
+#   prod      deploys from main
+#   secrets   OpenBao <environment>/<app> (preview/payments-api, prod/payments-api)
+#             as env vars; "secrets: []" for an environment that has none
 profile: spring-boot          # spring-boot | node
-app: payments-api
+host: payments                # payments.lab.home.arpa in prod, payments-pr-12... in preview
 
 # Optional: extra OS packages for the runtime image. Prefer this over keeping a
 # Dockerfile in the repo, so the app carries no build definition at all.
@@ -11,12 +19,9 @@ app: payments-api
 # generic profile one. Only for images the packages key cannot express.
 # containerfile: Dockerfile
 
-# Defaults, applied to every environment
-port: 8081
-host: payments                # payments.lab.home.arpa in prod, payments-pr-12... in preview
-java-opts: "-Xms128m -Xmx384m"
-env:
-  TZ: America/Mexico_City
+# port: 8081
+# java-opts: "-Xms128m -Xmx384m"
+# app: payments-api           # only when it differs from the repository name
 
 # Each environment overrides whatever it repeats.
 # Rule: maps (env) merge per key; environment scalars win over the defaults.
@@ -26,10 +31,9 @@ environments:
     env:
       LOG_LEVEL: DEBUG
 
-  prod:
-    branches: [main]          # a pull request never deploys to prod
-    # node-port: 30500        # optional fixed NodePort, for clients configured by address
-    secrets:
-      # Only the OpenBao path and the shape. No value passes through CI.
-      - path: prod/payments-api
-        format: env           # env | properties | yaml
+  # prod:
+  #   branches: [main, release]
+  #   node-port: 30500        # optional fixed NodePort, for clients configured by address
+  #   secrets:                # only when the convention does not fit
+  #     - path: prod/payments
+  #       format: properties  # env | properties | yaml
