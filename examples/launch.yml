@@ -20,7 +20,8 @@ host: payments                # payments.lab.home.arpa in prod, payments-pr-12..
 # containerfile: Dockerfile
 
 # port: 8081
-# java-opts: "-Xms128m -Xmx384m"
+# java-opts: "-Xmx384m"      # spring-boot default: -XX:MaxRAMPercentage=75
+# memory: 1Gi                 # container memory limit; default 512Mi
 # app: payments-api           # only when it differs from the repository name
 
 # Each environment overrides whatever it repeats.
