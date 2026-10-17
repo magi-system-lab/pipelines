@@ -34,7 +34,10 @@ jobs:
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, homelab]
+    # The builder is chosen by the org variable BUILDER_LABEL: "balthazar"
+    # builds on the cluster node itself, anything else (or unset) falls back
+    # to the Mac. Switching or rolling back is a one-variable change.
+    runs-on: [self-hosted, "${{ vars.BUILDER_LABEL || 'homelab' }}"]
     timeout-minutes: 45
 
     steps:
@@ -55,6 +58,7 @@ jobs:
       # certificate validation intact.
       - name: Open a tunnel to the cluster API
         id: tunnel
+        if: runner.os == 'macOS'
         run: |
           set -euo pipefail
           PORT=$(( 7000 + ${{ github.run_id }} % 2000 ))
@@ -75,6 +79,17 @@ jobs:
           echo "port=$PORT" >> "$GITHUB_OUTPUT"
           KUBECONFIG="$KCFG" kubectl version -o json >/dev/null
           echo "tunnel up on 127.0.0.1:$PORT and the API answers"
+
+      # On balthazar the API is local. The runner's kubeconfig belongs to the
+      # ci-deployer ServiceAccount, scoped to what the charts need: no nodes,
+      # no RBAC, no CRDs, no pods/exec.
+      - name: Use the node's local cluster API
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+          KUBECONFIG="$HOME/.kube/config" kubectl version -o json >/dev/null
+          echo "local API answers as ci-deployer"
 
       - name: Read launch.yml and decide what to do
         id: plan
@@ -115,7 +130,7 @@ jobs:
           PORT=$(yq -r ".environments.$ENVNAME.port // .port // 8080" launch.yml)
           JAVA_OPTS=$(yq -r ".environments.$ENVNAME.\"java-opts\" // .\"java-opts\" // \"\"" launch.yml)
           HOSTBASE=$(yq -r ".environments.$ENVNAME.host // .host // \"\"" launch.yml)
-          yq -o=yaml ".env * (.environments.$ENVNAME.env // {})" launch.yml > /tmp/env.$$.yaml
+          yq -o=yaml ".env * (.environments.$ENVNAME.env // {})" launch.yml > "$RUNNER_TEMP/env.yaml"
 
           # Secrets: launch.yml only declares the OpenBao path and the shape.
           # No value ever passes through CI.
@@ -151,7 +166,7 @@ jobs:
             echo "host=$HOST"
             echo "priority=$PRIORITY"
             echo "image=localhost/$APP:$TAG"
-            echo "envfile=/tmp/env.$$.yaml"
+            echo "envfile=$RUNNER_TEMP/env.yaml"
             echo "containerfile=$CFILE"
             echo "packages=$PKGS"
             echo "secret_path=$SEC_PATH"
@@ -189,18 +204,26 @@ jobs:
         if: steps.plan.outputs.action == 'deploy'
         run: |
           set -euo pipefail
-          # No registry: the image travels over SSH straight into k3s containerd.
-          podman save --format oci-archive "${{ steps.plan.outputs.image }}" \
-            | ssh -i ~/.ssh/id_ed25519_balthazar_ci -o BatchMode=yes \
-                  "${{ secrets.CLUSTER_USER }}@${{ secrets.CLUSTER_HOST }}" \
-                  'sudo -n /usr/local/bin/k3s ctr images import -'
+          # No registry: the image is streamed straight into k3s containerd,
+          # locally on balthazar or over SSH from the Mac. sudo only allows
+          # this exact import command.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            podman save --format oci-archive "${{ steps.plan.outputs.image }}" \
+              | sudo -n /usr/local/bin/k3s ctr images import -
+          else
+            podman save --format oci-archive "${{ steps.plan.outputs.image }}" \
+              | ssh -i ~/.ssh/id_ed25519_balthazar_ci -o BatchMode=yes \
+                    "${{ secrets.CLUSTER_USER }}@${{ secrets.CLUSTER_HOST }}" \
+                    'sudo -n /usr/local/bin/k3s ctr images import -'
+          fi
 
       # The image lives in the cluster's containerd from here on, so the copy in
-      # the builder's store is dead weight: around 500 MB per deploy. Build
-      # cache layers are kept on purpose, since they are what makes the next
-      # Maven or npm build fast.
+      # the builder's store is dead weight. Runs even when an earlier step
+      # failed, so a broken deploy does not leave its image behind. Base images
+      # and the dependency cache mounts are kept on purpose: they are what makes
+      # the next build fast.
       - name: Drop the local copy of the image
-        if: steps.plan.outputs.action == 'deploy'
+        if: always() && steps.plan.outputs.action == 'deploy'
         run: |
           podman rmi "${{ steps.plan.outputs.image }}" 2>/dev/null || true
           podman image prune -f >/dev/null 2>&1 || true
@@ -237,7 +260,8 @@ jobs:
           fi
 
           # launch.yml becomes chart values; the chart supplies the convention.
-          cat > /tmp/values.generated.yaml <<EOF
+          VALUES="$RUNNER_TEMP/values.generated.yaml"
+          cat > "$VALUES" <<EOF
           app: "${{ steps.plan.outputs.app }}"
           image: "${{ steps.plan.outputs.image }}"
           port: ${{ steps.plan.outputs.port }}
@@ -254,12 +278,12 @@ jobs:
               path: "${SEC_PATH}"
               filename: "${FILENAME}"
           EOF
-          yq -i ".env = load(\"${{ steps.plan.outputs.envfile }}\")" /tmp/values.generated.yaml
+          yq -i ".env = load(\"${{ steps.plan.outputs.envfile }}\")" "$VALUES"
 
           helm upgrade --install "${{ steps.plan.outputs.app }}" \
             ".pipelines/profiles/${{ steps.plan.outputs.profile }}/chart" \
             --namespace "${{ steps.plan.outputs.ns }}" \
-            -f /tmp/values.generated.yaml \
+            -f "$VALUES" \
             --wait --timeout 8m
 
       - name: Deployment summary

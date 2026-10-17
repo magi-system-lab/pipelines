@@ -6,7 +6,15 @@ FROM docker.io/library/eclipse-temurin:21-jdk AS build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends maven && rm -rf /var/lib/apt/lists/*
 COPY . .
-RUN set -eux; \
+# Dependency caches persist across builds, so Maven and Gradle download them
+# once instead of on every deploy. Build output goes to tmpfs: thousands of
+# small class files never hit the builder's disk (a microSD on balthazar), and
+# only the final jar is copied into the layer.
+RUN --mount=type=cache,target=/root/.m2 \
+    --mount=type=cache,target=/root/.gradle \
+    --mount=type=tmpfs,target=/src/target \
+    --mount=type=tmpfs,target=/src/build \
+    set -eux; \
     if [ -x ./gradlew ]; then \
         ./gradlew --no-daemon clean bootJar -x test; \
         cp build/libs/*.jar /tmp/app.jar; \
