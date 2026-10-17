@@ -17,6 +17,8 @@ service:
   type: NodePort
   # Optional fixed NodePort (30000-32767), set from launch.yml "node-port".
   nodePort: ""
+  # Optional port published on the node itself (ServiceLB), set from launch.yml "host-port".
+  hostPort: ""
 
 # Ingress is only created when launch.yml declares "host".
 host: ""

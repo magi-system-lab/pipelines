@@ -35,6 +35,7 @@ environments:
   # prod:
   #   branches: [main, release]
   #   node-port: 30500        # optional fixed NodePort, for clients configured by address
+  #   host-port: 666          # optional: answer on balthazar.local:666 itself (k3s ServiceLB)
   #   secrets:                # only when the convention does not fit
   #     - path: prod/payments
   #       format: properties  # env | properties | yaml

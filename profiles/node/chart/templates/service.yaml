@@ -4,12 +4,18 @@ metadata:
   name: {{ include "sb.name" . }}
   labels: {{- include "sb.labels" . | nindent 4 }}
 spec:
+  {{- if .Values.service.hostPort }}
+  # ServiceLB (k3s) publishes a LoadBalancer port directly on the node, so the
+  # app answers on balthazar.local:<hostPort>, outside the NodePort range.
+  type: LoadBalancer
+  {{- else }}
   type: {{ .Values.service.type }}
+  {{- end }}
   selector:
     app.kubernetes.io/name: {{ .Values.app }}
   ports:
     - name: http
-      port: {{ .Values.port }}
+      port: {{ .Values.service.hostPort | default .Values.port }}
       targetPort: http
       {{- if .Values.service.nodePort }}
       # Fixed port for apps whose clients are configured by address, such as an
