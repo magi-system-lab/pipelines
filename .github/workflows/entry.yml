@@ -140,11 +140,14 @@ jobs:
 
           # Secrets: launch.yml only declares the OpenBao path and the shape.
           # No value ever passes through CI.
-          # Convention: <environment>/<app> as env vars, unless launch.yml says
-          # otherwise. "secrets: []" opts out, for an environment with no secret.
+          # Convention: OpenBao <environment>/<app>, unless launch.yml says
+          # otherwise. Spring Boot apps get it as /config/application.properties
+          # (keys are real property names); other profiles as env vars.
+          # "secrets: []" opts out, for an environment with no secret.
           SEC_KIND=$(yq -r ".environments.$ENVNAME.secrets | tag" launch.yml)
           if [ "$SEC_KIND" = "!!null" ]; then
-            SEC_PATH="$ENVNAME/$APP"; SEC_FORMAT=env
+            SEC_PATH="$ENVNAME/$APP"
+            if [ "$PROFILE" = "spring-boot" ]; then SEC_FORMAT=properties; else SEC_FORMAT=env; fi
           else
             SEC_PATH=$(yq -r ".environments.$ENVNAME.secrets[0].path // \"\"" launch.yml)
             SEC_FORMAT=$(yq -r ".environments.$ENVNAME.secrets[0].format // \"env\"" launch.yml)
