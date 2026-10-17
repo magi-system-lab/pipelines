@@ -242,7 +242,8 @@ jobs:
         run: |
           podman rmi "${{ steps.plan.outputs.image }}" 2>/dev/null || true
           podman image prune -f >/dev/null 2>&1 || true
-          echo "builder store now: $(podman system df --format '{{.TotalCount}} images, {{.Size}}' 2>/dev/null | head -1)"
+          # Column layout instead of --format: the field names differ between Podman versions.
+          echo "builder store now: $(podman system df 2>/dev/null | awk '$1 == "Images" {print $2 " images, " $4}')"
 
       - name: Prepare the namespace and its resource cap
         if: steps.plan.outputs.action == 'deploy'
