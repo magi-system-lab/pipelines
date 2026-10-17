@@ -12,6 +12,8 @@ priorityClass: preview-priority
 service:
   # NodePort keeps apps reachable by IP until local DNS exists.
   type: NodePort
+  # Optional fixed NodePort (30000-32767), set from launch.yml "node-port".
+  nodePort: ""
 
 # Ingress is only created when launch.yml declares "host".
 host: ""
