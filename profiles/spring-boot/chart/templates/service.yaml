@@ -11,3 +11,8 @@ spec:
     - name: http
       port: {{ .Values.port }}
       targetPort: http
+      {{- if .Values.service.nodePort }}
+      # Fixed port for apps whose clients are configured by address, such as an
+      # MCP server; otherwise Kubernetes assigns one.
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}

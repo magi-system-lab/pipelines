@@ -130,6 +130,8 @@ jobs:
           PORT=$(yq -r ".environments.$ENVNAME.port // .port // 8080" launch.yml)
           JAVA_OPTS=$(yq -r ".environments.$ENVNAME.\"java-opts\" // .\"java-opts\" // \"\"" launch.yml)
           HOSTBASE=$(yq -r ".environments.$ENVNAME.host // .host // \"\"" launch.yml)
+          # Per environment only: a fixed port shared by prod and a preview would collide.
+          NODEPORT=$(yq -r ".environments.$ENVNAME.\"node-port\" // \"\"" launch.yml)
           yq -o=yaml ".env * (.environments.$ENVNAME.env // {})" launch.yml > "$RUNNER_TEMP/env.yaml"
 
           # Secrets: launch.yml only declares the OpenBao path and the shape.
@@ -147,6 +149,10 @@ jobs:
           echo "$SEC_FORMAT" | grep -Eq '^(env|properties|yaml)$'  || { echo "::error::invalid secret format"; exit 1; }
           echo "$HOSTBASE"| grep -Eq '^[a-z0-9-]{0,40}$'           || { echo "::error::invalid host"; exit 1; }
           echo "$JAVA_OPTS" | grep -Eq '^[A-Za-z0-9 :=+._-]{0,200}$' || { echo "::error::invalid java-opts"; exit 1; }
+          if [ -n "$NODEPORT" ]; then
+            echo "$NODEPORT" | grep -Eq '^3[0-2][0-9]{3}$' && [ "$NODEPORT" -ge 30000 ] && [ "$NODEPORT" -le 32767 ] \
+              || { echo "::error::invalid node-port: $NODEPORT (use 30000-32767)"; exit 1; }
+          fi
 
           HOST=""
           if [ -n "$HOSTBASE" ] && [ "$HOSTBASE" != "null" ]; then
@@ -162,6 +168,7 @@ jobs:
             echo "ns=$NS"
             echo "action=$ACTION"
             echo "port=$PORT"
+            echo "node_port=$NODEPORT"
             echo "java_opts=$JAVA_OPTS"
             echo "host=$HOST"
             echo "priority=$PRIORITY"
@@ -284,6 +291,9 @@ jobs:
           javaOpts: "${{ steps.plan.outputs.java_opts }}"
           priorityClass: "${{ steps.plan.outputs.priority }}"
           host: "${{ steps.plan.outputs.host }}"
+          service:
+            type: NodePort
+            nodePort: "${{ steps.plan.outputs.node_port }}"
           externalSecrets:
             storeName: openbao
             env:

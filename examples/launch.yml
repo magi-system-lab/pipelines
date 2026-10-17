@@ -28,6 +28,7 @@ environments:
 
   prod:
     branches: [main]          # a pull request never deploys to prod
+    # node-port: 30500        # optional fixed NodePort, for clients configured by address
     secrets:
       # Only the OpenBao path and the shape. No value passes through CI.
       - path: prod/payments-api
