@@ -141,6 +141,7 @@ jobs:
           HOSTBASE=$(yq -r ".environments.$ENVNAME.host // .host // \"\"" launch.yml)
           # Per environment only: a fixed port shared by prod and a preview would collide.
           NODEPORT=$(yq -r ".environments.$ENVNAME.\"node-port\" // \"\"" launch.yml)
+          HOSTPORT=$(yq -r ".environments.$ENVNAME.\"host-port\" // \"\"" launch.yml)
           yq -o=yaml "(.env // {}) * (.environments.$ENVNAME.env // {})" launch.yml > "$RUNNER_TEMP/env.yaml"
 
           # Secrets: launch.yml only declares the OpenBao path and the shape.
@@ -168,6 +169,13 @@ jobs:
           echo "$SEC_FORMAT" | grep -Eq '^(env|properties|yaml)$'  || { echo "::error::invalid secret format"; exit 1; }
           echo "$HOSTBASE"| grep -Eq '^[a-z0-9-]{0,40}$'           || { echo "::error::invalid host"; exit 1; }
           echo "$JAVA_OPTS" | grep -Eq '^[A-Za-z0-9 :=+._-]{0,200}$' || { echo "::error::invalid java-opts"; exit 1; }
+          if [ -n "$HOSTPORT" ]; then
+            # Ports the node already uses or Kubernetes needs stay off limits.
+            echo "$HOSTPORT" | grep -Eq '^[1-9][0-9]{0,4}$' && [ "$HOSTPORT" -le 65535 ] \
+              && [ "$HOSTPORT" -lt 30000 ] \
+              && ! echo " 22 53 80 443 2379 2380 5353 6443 8472 10250 10256 51820 51821 " | grep -q " $HOSTPORT " \
+              || { echo "::error::invalid host-port: $HOSTPORT (below 30000, not a port the node uses)"; exit 1; }
+          fi
           echo "$MEMORY" | grep -Eq '^([1-9][0-9]{2,3}Mi|[1-4]Gi)?$'   || { echo "::error::invalid memory: $MEMORY (use e.g. 768Mi or 1Gi, up to 4Gi)"; exit 1; }
           if [ -n "$NODEPORT" ]; then
             echo "$NODEPORT" | grep -Eq '^3[0-2][0-9]{3}$' && [ "$NODEPORT" -ge 30000 ] && [ "$NODEPORT" -le 32767 ] \
@@ -189,6 +197,7 @@ jobs:
             echo "action=$ACTION"
             echo "port=$PORT"
             echo "node_port=$NODEPORT"
+            echo "host_port=$HOSTPORT"
             echo "memory=$MEMORY"
             echo "java_opts=$JAVA_OPTS"
             echo "host=$HOST"
@@ -316,6 +325,7 @@ jobs:
           service:
             type: NodePort
             nodePort: "${{ steps.plan.outputs.node_port }}"
+            hostPort: "${{ steps.plan.outputs.host_port }}"
           externalSecrets:
             storeName: openbao
             env:
