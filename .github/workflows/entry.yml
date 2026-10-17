@@ -133,6 +133,11 @@ jobs:
           # Merge rule: maps merge per key, environment scalars win over defaults.
           PORT=$(yq -r ".environments.$ENVNAME.port // .port // 8080" launch.yml)
           JAVA_OPTS=$(yq -r ".environments.$ENVNAME.\"java-opts\" // .\"java-opts\" // \"\"" launch.yml)
+          # The JVM sizes its heap at 25% of the container limit by default,
+          # 128 MB out of 512 Mi, which is too small for most Spring Boot apps.
+          if [ -z "$JAVA_OPTS" ] && [ "$PROFILE" = "spring-boot" ]; then JAVA_OPTS="-XX:MaxRAMPercentage=75"; fi
+          # Optional memory limit for apps that need more than the profile default.
+          MEMORY=$(yq -r ".environments.$ENVNAME.memory // .memory // \"\"" launch.yml)
           HOSTBASE=$(yq -r ".environments.$ENVNAME.host // .host // \"\"" launch.yml)
           # Per environment only: a fixed port shared by prod and a preview would collide.
           NODEPORT=$(yq -r ".environments.$ENVNAME.\"node-port\" // \"\"" launch.yml)
@@ -163,6 +168,7 @@ jobs:
           echo "$SEC_FORMAT" | grep -Eq '^(env|properties|yaml)$'  || { echo "::error::invalid secret format"; exit 1; }
           echo "$HOSTBASE"| grep -Eq '^[a-z0-9-]{0,40}$'           || { echo "::error::invalid host"; exit 1; }
           echo "$JAVA_OPTS" | grep -Eq '^[A-Za-z0-9 :=+._-]{0,200}$' || { echo "::error::invalid java-opts"; exit 1; }
+          echo "$MEMORY" | grep -Eq '^([1-9][0-9]{2,3}Mi|[1-4]Gi)?$'   || { echo "::error::invalid memory: $MEMORY (use e.g. 768Mi or 1Gi, up to 4Gi)"; exit 1; }
           if [ -n "$NODEPORT" ]; then
             echo "$NODEPORT" | grep -Eq '^3[0-2][0-9]{3}$' && [ "$NODEPORT" -ge 30000 ] && [ "$NODEPORT" -le 32767 ] \
               || { echo "::error::invalid node-port: $NODEPORT (use 30000-32767)"; exit 1; }
@@ -183,6 +189,7 @@ jobs:
             echo "action=$ACTION"
             echo "port=$PORT"
             echo "node_port=$NODEPORT"
+            echo "memory=$MEMORY"
             echo "java_opts=$JAVA_OPTS"
             echo "host=$HOST"
             echo "priority=$PRIORITY"
@@ -274,9 +281,10 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
 
           # Previews get a CPU and memory cap; prod is not capped per namespace.
+          # 2Gi of limits leaves room for a 1Gi app to roll over to a new pod.
           if [ "${{ steps.plan.outputs.env }}" = "preview" ]; then
             kubectl -n "${{ steps.plan.outputs.ns }}" create quota preview-quota \
-              --hard=requests.cpu=500m,requests.memory=512Mi,limits.memory=1Gi,pods=4 \
+              --hard=requests.cpu=500m,requests.memory=512Mi,limits.memory=2Gi,pods=4 \
               --dry-run=client -o yaml | kubectl apply -f -
           fi
 
@@ -319,6 +327,9 @@ jobs:
               filename: "${FILENAME}"
           EOF
           yq -i ".env = load(\"${{ steps.plan.outputs.envfile }}\")" "$VALUES"
+          # Only the limit: the request stays at the profile default.
+          MEMORY="${{ steps.plan.outputs.memory }}"
+          if [ -n "$MEMORY" ]; then MEMORY="$MEMORY" yq -i '.resources.limits.memory = strenv(MEMORY)' "$VALUES"; fi
 
           helm upgrade --install "${{ steps.plan.outputs.app }}" \
             ".pipelines/profiles/${{ steps.plan.outputs.profile }}/chart" \
