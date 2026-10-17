@@ -1,0 +1,31 @@
+# Headlamp: web UI to browse the cluster and follow pod logs.
+# Installed with:
+#   helm upgrade --install headlamp headlamp/headlamp --version 0.46.0 \
+#     --namespace headlamp --create-namespace -f cluster/headlamp/values.yaml
+#
+# Headlamp itself gets no cluster role. Every request uses the token the viewer
+# logs in with, which belongs to the read-only headlamp-viewer account defined in
+# viewer.yaml. The chart default would bind cluster-admin.
+
+clusterRoleBinding:
+  create: false
+
+service:
+  type: NodePort
+  # Fixed so the address can be bookmarked: http://balthazar.local:30800
+  nodePort: 30800
+
+securityContext:
+  runAsNonRoot: true
+  privileged: false
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
