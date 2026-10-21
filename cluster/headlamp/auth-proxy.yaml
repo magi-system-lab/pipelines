@@ -1,0 +1,122 @@
+# Username and password in front of Headlamp, so nobody has to paste a token.
+#
+# Caddy asks for HTTP basic auth (the browser's own login prompt, remembered by
+# the keychain), then forwards the request to Headlamp adding the read-only
+# headlamp-viewer token, which Headlamp accepts in the Authorization header.
+# Headlamp itself is only reachable inside the cluster (ClusterIP), so the
+# login cannot be bypassed.
+#
+# The user and its bcrypt hash live in the headlamp-auth Secret, created out of
+# band so they never land in this public repo:
+#   hash=$(podman run --rm caddy:2.11.7-alpine caddy hash-password --plaintext '<password>')
+#   kubectl -n headlamp create secret generic headlamp-auth \
+#     --from-literal=user=ivan --from-literal=hash="$hash"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: headlamp-auth-proxy
+  namespace: headlamp
+data:
+  Caddyfile: |
+    {
+      admin off
+      auto_https off
+    }
+
+    :8080 {
+      basic_auth {
+        {$AUTH_USER} {$AUTH_HASH}
+      }
+      reverse_proxy headlamp.headlamp.svc.cluster.local:80 {
+        # Replaces the browser's Basic credentials with the viewer token.
+        header_up Authorization "Bearer {$HEADLAMP_TOKEN}"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: headlamp-auth-proxy
+  namespace: headlamp
+  labels:
+    app.kubernetes.io/name: headlamp-auth-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: headlamp-auth-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: headlamp-auth-proxy
+      annotations:
+        # Bump to roll the pod after changing the password Secret.
+        homelab/auth-revision: "1"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: caddy
+          image: docker.io/library/caddy:2.11.7-alpine
+          args: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: AUTH_USER
+              valueFrom: {secretKeyRef: {name: headlamp-auth, key: user}}
+            - name: AUTH_HASH
+              valueFrom: {secretKeyRef: {name: headlamp-auth, key: hash}}
+            - name: HEADLAMP_TOKEN
+              valueFrom: {secretKeyRef: {name: headlamp-viewer-token, key: token}}
+            - name: XDG_DATA_HOME
+              value: /data
+            - name: XDG_CONFIG_HOME
+              value: /config
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              # The official binary carries this file capability; without it
+              # in the bounding set the kernel refuses to exec it. Port 8080
+              # does not need it, and no other capability is granted.
+              add: [NET_BIND_SERVICE]
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+          volumeMounts:
+            - {name: caddyfile, mountPath: /etc/caddy, readOnly: true}
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /config}
+      volumes:
+        - name: caddyfile
+          configMap: {name: headlamp-auth-proxy}
+        - name: data
+          emptyDir: {}
+        - name: config
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: headlamp-auth-proxy
+  namespace: headlamp
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: headlamp-auth-proxy
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      # The address Headlamp always had: http://balthazar.local:30800
+      nodePort: 30800
